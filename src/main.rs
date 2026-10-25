@@ -2,11 +2,19 @@
 //! the wordmark take turns, scaled to fill any terminal.
 
 mod art;
+mod backdrop;
+mod canvas;
 mod fonts;
 mod fx;
+mod glyph_table;
+mod glyphs;
+mod num;
 mod stage;
 mod theme;
+mod transition;
 
+use std::io::Write;
+use std::process::ExitCode;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
@@ -18,113 +26,203 @@ use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::terminal;
 use tachyonfx::EffectManager;
 
+use crate::art::{STYLES, Style};
+use crate::backdrop::{BACKDROPS, Backdrop};
+use crate::canvas::{Canvas, LOOKS, Look};
 use crate::fonts::SystemFonts;
-use crate::stage::{Scene, Stage};
-use crate::theme::{SHADERS, Shader, THEMES, Theme};
+use crate::glyphs::{GlyphSet, Glyphs};
+use crate::stage::Stage;
+use crate::stage::{Act, IDLES, Idle, Logo, Subject, Word};
+use crate::theme::{SHADERS, Shader, THEMES};
+use crate::transition::{Crossing, KINDS};
 
-const HOLD: Duration = Duration::from_secs(7);
+const USAGE: &str = "\
+usage: ratatui-showcase [--hold SECONDS] [--fps N] [--glyphs blocks|sextants|full]
 
-fn main() -> Result {
-    App::new()
+  --hold     how long each scene stays on screen (default 7)
+  --fps      frames per second (default 60)
+  --glyphs   block characters the terminal draws well (default full: octants
+             and wedges, as in foot, kitty, ghostty and wezterm)";
+
+struct Config {
+    hold: f32,
+    fps: f64,
+    glyphs: GlyphSet,
+}
+
+fn config() -> std::result::Result<Config, String> {
+    let mut config = Config {
+        hold: 7.0,
+        fps: 60.0,
+        glyphs: GlyphSet::Full,
+    };
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        let mut value = || args.next().ok_or(format!("{arg} needs a value"));
+        match arg.as_str() {
+            "--hold" => config.hold = value()?.parse().map_err(|_| "--hold takes seconds")?,
+            "--fps" => config.fps = value()?.parse().map_err(|_| "--fps takes a number")?,
+            "--glyphs" => config.glyphs = GlyphSet::parse(&value()?).ok_or("unknown glyph set")?,
+            "-h" | "--help" => return Err(String::new()),
+            _ => return Err(format!("unknown option {arg}")),
+        }
+    }
+    Ok(config)
+}
+
+fn main() -> ExitCode {
+    let config = match config() {
+        Ok(config) => config,
+        Err(message) => {
+            let (text, code) = if message.is_empty() {
+                (format!("{USAGE}\n"), ExitCode::SUCCESS)
+            } else {
+                (format!("{message}\n\n{USAGE}\n"), ExitCode::from(2))
+            };
+            // With stderr gone there is no one left to tell.
+            let _ = std::io::stderr().write_all(text.as_bytes());
+            return code;
+        }
+    };
+    let exit = App::new()
         .add_plugins((
             MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
-                1.0 / 60.0,
+                1.0 / config.fps.max(1.0),
             ))),
             RatatuiPlugins::default(),
         ))
         .insert_resource(SystemFonts::load())
-        .insert_resource(Show::default())
-        .init_resource::<Transitions>()
+        .insert_resource(Glyph(Glyphs::new(config.glyphs)))
+        .insert_resource(Show::new(config.hold))
+        .init_resource::<Effects>()
+        .init_resource::<Frame>()
         .add_systems(PreUpdate, input)
         .add_systems(Update, frame)
         .run();
-    Ok(())
+    if exit.is_success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+#[derive(Resource)]
+struct Glyph(Glyphs);
+
+#[derive(Resource, Default)]
+struct Frame(Canvas);
+
+/// Effects are `Send` but not `Sync`; with `ResMut` the lock is never contended.
+#[derive(Resource, Default)]
+struct Effects(Mutex<Layers>);
+
+#[derive(Default)]
+struct Layers {
+    transition: EffectManager<()>,
+    accent: EffectManager<()>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Entering,
     Holding,
+    Crossing,
     Leaving,
 }
 
 #[derive(Resource)]
 struct Show {
-    scene: Scene,
+    act: Act,
     stage: Option<Stage>,
+    /// The scene after the current cell transition.
+    pending: Option<Act>,
+    crossing: Option<Crossing>,
     phase: Phase,
     hold: Timer,
-    theme: usize,
-    shader: Shader,
+    accented: bool,
     caption: bool,
     skip: bool,
 }
 
-impl Default for Show {
-    fn default() -> Self {
+impl Show {
+    fn new(hold: f32) -> Self {
         Self {
-            scene: Scene::Mascot,
+            act: Act {
+                subject: Subject::Logo(Logo::Mascot),
+                theme: 0,
+                shader: Shader::Sheen,
+                backdrop: Backdrop::Vignette,
+                look: Look::Smooth,
+                style: Style::Solid,
+                idle: Idle::Float,
+            },
             stage: None,
+            pending: None,
+            crossing: None,
             phase: Phase::Entering,
-            hold: Timer::new(HOLD, TimerMode::Once),
-            theme: 0,
-            shader: Shader::Sheen,
+            hold: Timer::from_seconds(hold.max(0.5), TimerMode::Once),
+            accented: false,
             caption: true,
             skip: false,
         }
     }
-}
 
-impl Show {
-    fn theme(&self) -> &'static Theme {
-        THEMES
-            .get(self.theme)
-            .or(THEMES.first())
-            .unwrap_or(&FALLBACK_THEME)
-    }
-
-    /// Alternates logo and wordmark, each in a fresh theme and shader.
-    fn next_scene(&mut self, fonts: &SystemFonts) {
-        self.scene = if self.scene.is_logo() {
-            match fastrand::u8(0..6) {
-                0 => Scene::Logo { small: true },
-                1 => Scene::Logo { small: false },
-                2 => Scene::PixelFont,
-                _ => fonts
-                    .pick(stage::WORDMARK)
-                    .map_or(Scene::PixelFont, Scene::Face),
-            }
-        } else if matches!(self.scene, Scene::Mascot) == fastrand::bool() {
-            Scene::Emblem
-        } else {
-            Scene::Mascot
+    /// Alternates logo and wordmark, sometimes both together, each time in a
+    /// fresh combination of everything else.
+    fn next_act(current: &Act, fonts: &SystemFonts) -> Act {
+        let word = || match fastrand::u8(0..6) {
+            0 => Word::Small,
+            1 => Word::Tiny,
+            2 => Word::Pixel,
+            _ => fonts.pick(stage::WORDMARK).map_or(Word::Pixel, Word::Face),
         };
-        self.next_theme();
-        self.next_shader();
-    }
-
-    fn next_theme(&mut self) {
-        self.theme = (self.theme + 1 + fastrand::usize(..THEMES.len() - 1)) % THEMES.len();
-    }
-
-    fn next_shader(&mut self) {
-        let others: Vec<_> = SHADERS.iter().filter(|&&s| s != self.shader).collect();
-        self.shader = others
-            .get(fastrand::usize(..others.len()))
-            .map_or(self.shader, |&&s| s);
+        let logo = || {
+            if fastrand::bool() {
+                Logo::Mascot
+            } else {
+                Logo::Emblem
+            }
+        };
+        let subject = match (&current.subject, fastrand::u8(0..4)) {
+            (Subject::Lockup(..), n) if n < 2 => Subject::Logo(logo()),
+            (Subject::Lockup(..), _) => Subject::Word(word()),
+            (_, 0) => Subject::Lockup(logo(), word()),
+            (Subject::Logo(_), _) => Subject::Word(word()),
+            (Subject::Word(_), _) => Subject::Logo(logo()),
+        };
+        Act {
+            subject,
+            theme: other(THEMES.len(), current.theme),
+            shader: pick(SHADERS, Some(current.shader)).unwrap_or(Shader::Flow),
+            backdrop: pick(BACKDROPS, None).unwrap_or(Backdrop::Vignette),
+            look: pick(LOOKS, None).unwrap_or(Look::Smooth),
+            style: pick(STYLES, None).unwrap_or(Style::Solid),
+            idle: pick(IDLES, None).unwrap_or(Idle::Still),
+        }
     }
 }
 
-const FALLBACK_THEME: Theme = Theme {
-    name: "",
-    background: theme::Rgb(0.0, 0.0, 0.0),
-    stops: &[],
-    accent: theme::Rgb::WHITE,
-};
+/// A random index below `n` other than `current`.
+fn other(n: usize, current: usize) -> usize {
+    current
+        .saturating_add(1)
+        .saturating_add(fastrand::usize(..n.saturating_sub(1).max(1)))
+        .checked_rem(n)
+        .unwrap_or(0)
+}
 
-/// Effects are `Send` but not `Sync`; with `ResMut` the lock is never contended.
-#[derive(Resource, Default)]
-struct Transitions(Mutex<EffectManager<()>>);
+/// A random item, avoiding `avoid` when possible.
+fn pick<T: Copy + PartialEq>(items: &[T], avoid: Option<T>) -> Option<T> {
+    let choices: Vec<T> = items
+        .iter()
+        .copied()
+        .filter(|&i| Some(i) != avoid)
+        .collect();
+    choices
+        .get(fastrand::usize(..choices.len().max(1)))
+        .copied()
+        .or(items.first().copied())
+}
 
 fn input(
     mut keys: MessageReader<KeyMessage>,
@@ -133,101 +231,206 @@ fn input(
     mut exit: MessageWriter<AppExit>,
 ) {
     for key in keys.read().filter(|key| key.kind != KeyEventKind::Release) {
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => {
-                exit.write_default();
+        let show = &mut *show;
+        let act = show
+            .stage
+            .as_mut()
+            .map_or(&mut show.act, |stage| &mut stage.act);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+            || (ctrl && key.code == KeyCode::Char('c'))
+        {
+            exit.write_default();
+        } else if matches!(
+            key.code,
+            KeyCode::Char(' ') | KeyCode::Right | KeyCode::Enter
+        ) {
+            show.skip = true;
+        } else if let KeyCode::Char(c) = key.code {
+            match c {
+                't' => act.theme = other(THEMES.len(), act.theme),
+                's' => act.shader = pick(SHADERS, Some(act.shader)).unwrap_or(act.shader),
+                'b' => act.backdrop = pick(BACKDROPS, Some(act.backdrop)).unwrap_or(act.backdrop),
+                'l' => act.look = pick(LOOKS, Some(act.look)).unwrap_or(act.look),
+                'i' => show.caption = !show.caption,
+                _ => {}
             }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                exit.write_default();
-            }
-            KeyCode::Char(' ') | KeyCode::Right | KeyCode::Enter => show.skip = true,
-            KeyCode::Char('t') => show.next_theme(),
-            KeyCode::Char('s') => show.next_shader(),
-            KeyCode::Char('i') => show.caption = !show.caption,
-            _ => {}
         }
     }
-    if resizes.read().count() > 0 {
-        show.stage = None;
+    if resizes.read().count() > 0
+        && let Some(stage) = show.stage.take()
+    {
+        show.act = stage.act;
     }
 }
 
 fn frame(
     mut context: ResMut<RatatuiContext>,
     mut show: ResMut<Show>,
-    mut transitions: ResMut<Transitions>,
+    mut effects: ResMut<Effects>,
+    mut canvas: ResMut<Frame>,
+    glyphs: Res<Glyph>,
     fonts: Res<SystemFonts>,
     time: Res<Time>,
 ) -> Result {
     let show = &mut *show;
-    let transitions = transitions
-        .0
-        .get_mut()
-        .unwrap_or_else(PoisonError::into_inner);
+    let effects = effects.0.get_mut().unwrap_or_else(PoisonError::into_inner);
+    let canvas = &mut canvas.0;
+    let (t, dt) = (time.elapsed_secs(), time.delta());
     context.draw(|frame| {
-        let size = frame.area();
-        if show.stage.as_ref().is_none_or(|stage| stage.size != size) {
+        let area = frame.area();
+        if show
+            .stage
+            .as_ref()
+            .is_none_or(|stage| (stage.cols, stage.rows) != (area.width, area.height))
+        {
+            let first = show.stage.is_none()
+                && show.phase == Phase::Entering
+                && !effects.transition.is_running();
+            let act = show
+                .stage
+                .take()
+                .map_or_else(|| show.act.clone(), |stage| stage.act);
             // A half-finished transition would play on the old layout: settle it.
-            if show.stage.is_some() && show.phase != Phase::Holding {
-                transitions.cancel_unique_effect(());
-                show.phase = Phase::Holding;
+            if let Some(pending) = show.pending.take() {
+                show.act = pending;
+            } else {
+                show.act = act;
             }
-            show.stage = Some(Stage::new(&show.scene, size, screen_aspect()));
-            if show.phase == Phase::Entering
-                && let Some(stage) = &show.stage
-            {
-                transitions.add_unique_effect((), fx::enter(stage, show.theme()));
+            effects.transition.cancel_unique_effect(());
+            effects.accent.cancel_unique_effect(());
+            show.crossing = None;
+            show.phase = Phase::Holding;
+            let stage = Stage::new(show.act.clone(), area.width, area.height, cell_ratio());
+            if first {
+                effects
+                    .transition
+                    .add_unique_effect((), fx::enter(&stage, area));
+                show.phase = Phase::Entering;
             }
+            show.stage = Some(stage);
         }
 
         let skip = std::mem::take(&mut show.skip);
         match show.phase {
-            Phase::Entering if skip || !transitions.is_running() => {
+            Phase::Entering if skip || !effects.transition.is_running() => {
                 show.phase = Phase::Holding;
                 show.hold.reset();
+                show.accented = false;
             }
-            Phase::Holding if skip || show.hold.tick(time.delta()).is_finished() => {
-                show.phase = Phase::Leaving;
-                if let Some(stage) = &show.stage {
-                    transitions.add_unique_effect((), fx::leave(stage, show.theme()));
+            Phase::Holding => {
+                show.hold.tick(dt);
+                if !show.accented && show.hold.fraction() > 0.45 {
+                    show.accented = true;
+                    if let Some(stage) = &show.stage
+                        && let Some(accent) = fx::accent(stage, area)
+                    {
+                        effects.accent.add_unique_effect((), accent);
+                    }
+                }
+                if skip || show.hold.is_finished() {
+                    effects.accent.cancel_unique_effect(());
+                    change(show, effects, &fonts, area);
                 }
             }
-            Phase::Leaving if !transitions.is_running() => {
-                show.next_scene(&fonts);
-                let stage = Stage::new(&show.scene, size, screen_aspect());
-                transitions.add_unique_effect((), fx::enter(&stage, show.theme()));
-                show.stage = Some(stage);
+            Phase::Crossing => {
+                if let Some(crossing) = &mut show.crossing {
+                    crossing.advance(dt.as_secs_f32());
+                }
+                if show.crossing.as_ref().is_none_or(Crossing::done) {
+                    show.crossing = None;
+                    show.phase = Phase::Holding;
+                    show.hold.reset();
+                    show.accented = false;
+                }
+            }
+            Phase::Leaving if !effects.transition.is_running() => {
+                if let Some(act) = show.pending.take() {
+                    let stage = Stage::new(act, area.width, area.height, cell_ratio());
+                    effects
+                        .transition
+                        .add_unique_effect((), fx::enter(&stage, area));
+                    show.stage = Some(stage);
+                }
                 show.phase = Phase::Entering;
             }
-            _ => {}
+            Phase::Entering | Phase::Leaving => {}
         }
 
         let Some(stage) = &show.stage else { return };
-        let theme = show.theme();
-        stage.draw(frame.buffer_mut(), theme, show.shader, time.elapsed_secs());
-        transitions.process_effects(time.delta().into(), frame.buffer_mut(), size);
+        canvas.resize(area.width as usize, area.height as usize);
+        match &show.crossing {
+            Some(crossing) => crossing.render(canvas, stage, t),
+            None => transition::still(canvas, stage, t),
+        }
+        canvas.encode(stage.act.look, &glyphs.0, frame.buffer_mut());
+        effects
+            .transition
+            .process_effects(dt.into(), frame.buffer_mut(), area);
+        effects
+            .accent
+            .process_effects(dt.into(), frame.buffer_mut(), area);
+
         if show.caption {
-            let caption = format!(
+            let act = &stage.act;
+            let mut caption = format!(
                 "{}  ·  {}  ·  {}",
-                show.scene.label(),
-                theme.name,
-                show.shader.name()
+                act.label(),
+                act.theme().name,
+                act.shader.name()
             );
-            stage.caption(frame.buffer_mut(), &caption, theme);
+            caption += &format!("  ·  {}  ·  {}", act.backdrop.name(), act.look.name());
+            if let Some(crossing) = &show.crossing {
+                caption += &format!("  ·  ↦ {}", crossing.kind.name());
+            }
+            caption_line(frame.buffer_mut(), &caption, act);
         }
     })?;
     Ok(())
 }
 
-/// How many times taller than wide a half-cell pixel is. Terminals that
-/// don't report their pixel size are assumed to have 1:2 cells.
-fn screen_aspect() -> f32 {
+/// Starts the change to the next scene: usually a pixel-level crossing in
+/// the same look, sometimes a cell-level transition that can change the look.
+fn change(show: &mut Show, effects: &mut Layers, fonts: &SystemFonts, area: ratatui::layout::Rect) {
+    let Some(from) = show.stage.take() else {
+        return;
+    };
+    let mut next = Show::next_act(&from.act, fonts);
+    if fastrand::f32() < 0.8 {
+        next.look = from.act.look;
+        let to = Stage::new(next, area.width, area.height, cell_ratio());
+        let kind = pick(KINDS, None).unwrap_or(transition::Kind::Morph);
+        show.crossing = Some(Crossing::new(kind, from, &to));
+        show.stage = Some(to);
+        show.phase = Phase::Crossing;
+    } else {
+        effects
+            .transition
+            .add_unique_effect((), fx::leave(&from, area));
+        show.stage = Some(from);
+        show.pending = Some(next);
+        show.phase = Phase::Leaving;
+    }
+}
+
+fn caption_line(buf: &mut ratatui::buffer::Buffer, text: &str, act: &Act) {
+    let theme = act.theme();
+    let width = num::u16_of(text.chars().count());
+    let x = buf.area.width.saturating_sub(width) / 2;
+    let y = buf.area.height.saturating_sub(1);
+    let color = theme.sample(0.0).lerp(theme.background, 0.45).color();
+    buf.set_string(x, y, text, ratatui::style::Style::new().fg(color));
+}
+
+/// A cell's height over its width. Terminals that don't report their pixel
+/// size are assumed to have 1:2 cells.
+fn cell_ratio() -> f32 {
     match terminal::window_size() {
         Ok(size) if size.width > 0 && size.height > 0 && size.columns > 0 && size.rows > 0 => {
-            let cell_w = size.width as f32 / size.columns as f32;
-            let cell_h = size.height as f32 / size.rows as f32;
-            (cell_h / 2.0 / cell_w).clamp(0.5, 2.0)
+            let cell_w = f32::from(size.width) / f32::from(size.columns);
+            let cell_h = f32::from(size.height) / f32::from(size.rows);
+            (cell_h / cell_w).clamp(1.0, 4.0)
         }
-        _ => 1.0,
+        _ => 2.0,
     }
 }
