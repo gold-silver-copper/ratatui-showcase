@@ -8,35 +8,65 @@ fill any terminal while keeping their proportions, with
 
 ```sh
 cargo run --release
+cargo run --release -- --hold 10 --glyphs sextants
 ```
 
 | Key | Action |
 | --- | --- |
-| `Space`, `→`, `Enter` | Next transition |
+| `Space`, `→`, `Enter` | Next scene |
 | `t` | Next colour theme |
 | `s` | Next shader |
+| `b` | Next background |
+| `l` | Next look |
 | `i` | Show or hide the caption |
 | `q`, `Esc`, `Ctrl-C` | Quit |
 
+| Option | Meaning |
+| --- | --- |
+| `--hold SECONDS` | How long each scene stays (default 7) |
+| `--fps N` | Frames per second (default 60) |
+| `--glyphs blocks\|sextants\|full` | Block characters your terminal draws well. `full` (the default) adds octants and diagonal wedges, which foot, kitty, ghostty and wezterm draw themselves; use `sextants` or `blocks` elsewhere. |
+
 ## What it shows
 
-- **Logos:** the ratatui mascot, and the pixel-art rat from `assets/logo.svg`.
-- **Wordmarks:** the `RatatuiLogo` small and tiny block lettering, the classic
-  8x8 bitmap font, and the word set in a random font installed on the system.
+- **Subjects:** the ratatui mascot, the pixel-art rat from `assets/logo.svg`,
+  the `RatatuiLogo` block lettering, the classic 8x8 font, the word set in a
+  random font installed on the system, and logo and wordmark together.
+- **Styles:** solid, outlined, extruded 3D lettering, or reflected.
+- **Themes:** Classic, Aurora, Synthwave, Ember, Ocean, Candy, Phosphor, Prism,
+  Sunset, Glacier and Toxic.
+- **Shaders:** flow, plasma, pulse, sheen, rainbow, scanline, chrome, holo,
+  fire and stripes, with a soft glow around the art.
+- **Backgrounds:** a vignette, twinkling stars, a synthwave grid, aurora
+  curtains, or slow sun rays.
+- **Motion while holding:** still, floating, waving, breathing or swaying.
+- **Looks:** smooth block glyphs, chunky pixels, braille dots, ASCII, or an
+  LED sign.
 
-Each scene gets a colour theme (Classic, Aurora, Synthwave, Ember, Ocean,
-Candy, Phosphor, Prism) and a shader (flow, plasma, pulse, sheen, rainbow,
-scanline), with a soft glow around the art.
+## Transitions
+
+Most scene changes are drawn at sub-cell resolution across the whole screen:
+radial, diamond, clock, spiral, diagonal, blinds and checkerboard wipes, burn,
+zoom, swirl, ripple, mosaic, slices, glitch, a CRT switching off and on, and
+particle effects where the old art's pixels morph, swarm, scatter, pour, spiral
+through a vortex or crumble into the new art. When the look changes, a
+[tachyonfx](https://github.com/ratatui/tachyonfx) transition plays instead:
+dissolves, fades, sweeps, slides, evolving symbols, and terminaltexteffects-style
+decrypt, matrix rain and light beams.
 
 ## How it scales
 
-Everything is drawn as pixels, two per cell with `▀`. Pixel art scales by
-whole numbers so every pixel stays the same size; fonts are rasterized at the
-exact size that fits. The terminal's pixel size, where it reports one, corrects
-for the shape of its cells, so the art is never stretched.
+Art is rasterized at 4x8 samples per cell, at the exact size that fills the
+terminal; pixel art scales by whole numbers so every pixel stays the same size.
+Each cell on an edge gets the block glyph whose shape best matches its samples
+(halves, quadrants, eighths, sextants, octants or diagonal wedges), with
+colours blended in linear light, so edges stay crisp and curves smooth. The
+terminal's pixel size, where it reports one, corrects for the shape of its
+cells, so the art is never stretched.
 
 ## Credits
 
 The mascot and the `RatatuiLogo` lettering come from `ratatui-widgets`, and the
 rat from ratatui's `assets/logo.svg`, both MIT licensed by the ratatui
-developers.
+developers. The octant and wedge shapes in `src/glyph_table.rs` were generated
+from foot's `box-drawing.c` (MIT).

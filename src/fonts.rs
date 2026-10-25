@@ -6,6 +6,7 @@ use ab_glyph::{Font, FontVec, PxScale, Rect, ScaleFont, point};
 use bevy::prelude::*;
 
 use crate::art::{Bitmap, Material, Px};
+use crate::num;
 
 /// Families that map letters to pictures, or don't draw Latin at all.
 const SKIP: &[&str] = &[
@@ -18,6 +19,7 @@ pub struct SystemFonts {
     faces: Vec<fontdb::ID>,
 }
 
+#[derive(Clone)]
 pub struct Face {
     pub name: String,
     pub font: Arc<FontVec>,
@@ -74,7 +76,7 @@ fn style_name(info: &fontdb::FaceInfo) -> String {
     };
     match info.style {
         fontdb::Style::Normal => weight.to_owned(),
-        _ => format!("{weight} Italic"),
+        fontdb::Style::Italic | fontdb::Style::Oblique => format!("{weight} Italic"),
     }
 }
 
@@ -97,17 +99,21 @@ pub fn rasterize(
         return Bitmap::default();
     };
     let mut bitmap = Bitmap::new(
-        bounds.width().ceil() as usize,
-        bounds.height().ceil() as usize,
+        num::floor_usize(bounds.width().ceil()),
+        num::floor_usize(bounds.height().ceil()),
         screen_aspect,
     );
     for glyph in layout(font, text, size, screen_aspect) {
         let Some(outline) = font.outline_glyph(glyph) else {
             continue;
         };
-        let min = outline.px_bounds().min - bounds.min;
+        let corner = outline.px_bounds().min;
+        let min = point(corner.x - bounds.min.x, corner.y - bounds.min.y);
         outline.draw(|x, y, coverage| {
-            let (x, y) = ((min.x + x as f32) as usize, (min.y + y as f32) as usize);
+            let (x, y) = (
+                num::floor_usize(min.x + x as f32),
+                num::floor_usize(min.y + y as f32),
+            );
             let ink = bitmap.get(x, y).ink.max(coverage.min(1.0));
             bitmap.set(
                 x,

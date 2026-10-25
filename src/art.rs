@@ -1,5 +1,7 @@
 //! Source artwork as pixel bitmaps, and scaling them to fit any terminal.
 
+use crate::num;
+
 /// What a pixel is made of; the theme colours each material differently.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Material {
@@ -10,6 +12,51 @@ pub enum Material {
     Screen,
     Border,
     Cursor,
+    /// The side of extruded 3D lettering: 0 at the face, 255 at the back.
+    Depth(u8),
+    /// A mirror image below the art, faded to `n / 255` brightness.
+    Reflection(u8),
+}
+
+/// How the art's shape is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Style {
+    Solid,
+    Outline,
+    Extrude,
+    Reflect,
+}
+
+pub const STYLES: &[Style] = &[
+    Style::Solid,
+    Style::Solid,
+    Style::Outline,
+    Style::Extrude,
+    Style::Reflect,
+];
+
+impl Style {
+    /// The share of the layout box the plain art may use, leaving room for
+    /// what the style adds.
+    pub fn reserve(self) -> (f32, f32) {
+        match self {
+            Style::Solid | Style::Outline => (1.0, 1.0),
+            Style::Extrude => (0.93, 0.86),
+            Style::Reflect => (1.0, 0.64),
+        }
+    }
+
+    pub fn apply(self, bitmap: Bitmap) -> Bitmap {
+        match self {
+            Style::Solid => bitmap,
+            Style::Outline => bitmap.outline((bitmap.height / 14).max(2)),
+            Style::Extrude => {
+                let depth = (bitmap.height / 9).max(2);
+                bitmap.extrude(depth)
+            }
+            Style::Reflect => bitmap.reflect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -35,24 +82,25 @@ impl Bitmap {
             width,
             height,
             aspect,
-            pixels: vec![Px::default(); width * height],
+            pixels: vec![Px::default(); width.saturating_mul(height)],
         }
     }
 
+    fn index(&self, x: usize, y: usize) -> Option<usize> {
+        (x < self.width)
+            .then(|| y.checked_mul(self.width)?.checked_add(x))
+            .flatten()
+    }
+
     pub fn get(&self, x: usize, y: usize) -> Px {
-        if x >= self.width {
-            return Px::default();
-        }
-        self.pixels
-            .get(y * self.width + x)
+        self.index(x, y)
+            .and_then(|i| self.pixels.get(i))
             .copied()
             .unwrap_or_default()
     }
 
     pub fn set(&mut self, x: usize, y: usize, px: Px) {
-        if x < self.width
-            && let Some(p) = self.pixels.get_mut(y * self.width + x)
-        {
+        if let Some(p) = self.index(x, y).and_then(|i| self.pixels.get_mut(i)) {
             *p = px;
         }
     }
@@ -83,15 +131,18 @@ impl Bitmap {
             box_h,
             screen_aspect,
         );
-        let width = (self.width as f32 * fx).round() as usize;
-        let height = (self.height as f32 * fy).round() as usize;
+        let width = num::floor_usize((num::float(self.width) * fx).round());
+        let height = num::floor_usize((num::float(self.height) * fy).round());
         let mut out = Self::new(width, height, screen_aspect);
         for y in 0..height {
             for x in 0..width {
                 out.set(
                     x,
                     y,
-                    self.get((x as f32 / fx) as usize, (y as f32 / fy) as usize),
+                    self.get(
+                        num::floor_usize(num::float(x) / fx),
+                        num::floor_usize(num::float(y) / fy),
+                    ),
                 );
             }
         }
@@ -102,13 +153,17 @@ impl Bitmap {
     /// Used for the neon glow around the art.
     pub fn glow(&self, radius: usize) -> Bitmap {
         let mut padded = Self::new(
-            self.width + 2 * radius,
-            self.height + 2 * radius,
+            self.width.saturating_add(radius.saturating_mul(2)),
+            self.height.saturating_add(radius.saturating_mul(2)),
             self.aspect,
         );
         for y in 0..self.height {
             for x in 0..self.width {
-                padded.set(x + radius, y + radius, self.get(x, y));
+                padded.set(
+                    x.saturating_add(radius),
+                    y.saturating_add(radius),
+                    self.get(x, y),
+                );
             }
         }
         // Two separable box blurs approximate a gaussian.
@@ -118,9 +173,112 @@ impl Bitmap {
         padded
     }
 
+    /// Only the rim of the shape, `width` pixels thick.
+    fn outline(&self, width: usize) -> Bitmap {
+        let mut out = Self::new(self.width, self.height, self.aspect);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let px = self.get(x, y);
+                if px.ink <= 0.0 {
+                    continue;
+                }
+                let inside = [(width, 0), (0, width)]
+                    .iter()
+                    .flat_map(|&(dx, dy)| {
+                        [
+                            (x.checked_sub(dx), y.checked_sub(dy)),
+                            (x.checked_add(dx), y.checked_add(dy)),
+                        ]
+                    })
+                    .map(|(nx, ny)| match (nx, ny) {
+                        (Some(nx), Some(ny)) => self.get(nx, ny).ink,
+                        _ => 0.0,
+                    })
+                    .fold(1.0_f32, f32::min);
+                out.set(
+                    x,
+                    y,
+                    Px {
+                        ink: px.ink * (1.0 - inside),
+                        ..px
+                    },
+                );
+            }
+        }
+        out
+    }
+
+    /// 3D lettering: the face over `depth` receding layers.
+    fn extrude(&self, depth: usize) -> Bitmap {
+        let mut out = Self::new(
+            self.width.saturating_add(depth),
+            self.height.saturating_add(depth),
+            self.aspect,
+        );
+        for layer in (1..=depth).rev() {
+            let material =
+                Material::Depth(num::round_u8(num::float(layer) * 255.0 / num::float(depth)));
+            for y in 0..self.height {
+                for x in 0..self.width {
+                    let ink = self.get(x, y).ink;
+                    let (ox, oy) = (x.saturating_add(layer), y.saturating_add(layer));
+                    if ink > out.get(ox, oy).ink {
+                        out.set(ox, oy, Px { ink, material });
+                    }
+                }
+            }
+        }
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let px = self.get(x, y);
+                if px.ink > 0.0 {
+                    let behind = out.get(x, y).ink;
+                    out.set(
+                        x,
+                        y,
+                        Px {
+                            ink: px.ink.max(behind),
+                            material: px.material,
+                        },
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// The art over a fading mirror image of itself.
+    fn reflect(&self) -> Bitmap {
+        let gap = (self.height / 16).max(1);
+        let mirror = self.height / 2;
+        let below = self.height.saturating_add(gap);
+        let mut out = Self::new(self.width, below.saturating_add(mirror), self.aspect);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                out.set(x, y, self.get(x, y));
+            }
+        }
+        for my in 0..mirror {
+            let fade = 0.45 * (1.0 - my as f32 / mirror as f32);
+            let material = Material::Reflection(num::round_u8(fade * 255.0));
+            for x in 0..self.width {
+                let px = self.get(x, self.height.saturating_sub(my.saturating_add(1)));
+                out.set(
+                    x,
+                    below.saturating_add(my),
+                    Px {
+                        ink: px.ink,
+                        material,
+                    },
+                );
+            }
+        }
+        out
+    }
+
     fn box_blur(&self, radius: usize, horizontal: bool) -> Self {
         let mut out = Self::new(self.width, self.height, self.aspect);
-        let span = (2 * radius + 1) as f32;
+        let span = num::float(radius) * 2.0 + 1.0;
         let (outer, inner) = if horizontal {
             (self.height, self.width)
         } else {
@@ -143,7 +301,8 @@ impl Bitmap {
                         material: Material::Ink,
                     },
                 );
-                if let Some(add) = (i + radius + 1 < inner).then(|| at(o, i + radius + 1)) {
+                let ahead = i.saturating_add(radius).saturating_add(1);
+                if let Some(add) = (ahead < inner).then(|| at(o, ahead)) {
                     sum += self.get(add.0, add.1).ink;
                 }
                 if let Some(sub) = i.checked_sub(radius).map(|j| at(o, j)) {
@@ -175,7 +334,7 @@ fn fit_scale(
         return (fit, fit * ratio);
     }
     // Whole-number factors keep every source pixel the same size.
-    (1..=fit.floor() as usize)
+    (1..=num::floor_usize(fit))
         .rev()
         .map(|fx| (fx as f32, (fx as f32 * ratio).round().max(1.0)))
         .find(|&(_, fy)| h as f32 * fy <= box_h as f32)
@@ -347,13 +506,13 @@ pub fn pixel_font(text: &str) -> Bitmap {
         .chars()
         .filter_map(|c| font8x8::BASIC_FONTS.get(c))
         .collect();
-    let mut bitmap = Bitmap::new(glyphs.len() * 8, 8, 1.0);
+    let mut bitmap = Bitmap::new(glyphs.len().saturating_mul(8), 8, 1.0);
     for (i, glyph) in glyphs.iter().enumerate() {
         for (y, row) in glyph.iter().enumerate() {
             for x in 0..8 {
-                if row & (1 << x) != 0 {
+                if crate::glyphs::bit(u32::from(*row), x) {
                     bitmap.set(
-                        i * 8 + x,
+                        i.saturating_mul(8).saturating_add(x),
                         y,
                         Px {
                             ink: 1.0,
