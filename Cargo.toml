@@ -1,0 +1,29 @@
+[package]
+name = "ratatui-showcase"
+version = "0.1.0"
+edition = "2024"
+description = "A fullscreen ratatui showcase for big monitors and projectors"
+license = "MIT"
+repository = "https://github.com/gold-silver-copper/ratatui-showcase"
+
+[dependencies]
+ab_glyph = "0.2.32"
+bevy = { version = "0.20.0", default-features = false }
+bevy_ratatui = "0.13.0"
+fastrand = "2.5.0"
+font8x8 = "0.3.1"
+fontdb = "0.24.0"
+ratatui = "0.30.2"
+tachyonfx = { version = "0.25.2", features = ["sendable"] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
