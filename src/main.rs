@@ -3,11 +3,11 @@
 
 mod art;
 mod backdrop;
-mod canvas;
 mod fonts;
 mod fx;
 mod glyph_table;
 mod glyphs;
+mod gpu;
 mod num;
 mod stage;
 mod theme;
@@ -18,8 +18,11 @@ use std::process::ExitCode;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use bevy::app::TaskPoolOptions;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::prelude::*;
+use bevy::render::RenderPlugin;
+use bevy::window::ExitCondition;
 use bevy_ratatui::event::{KeyMessage, ResizeMessage};
 use bevy_ratatui::{RatatuiContext, RatatuiPlugins};
 use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
@@ -28,11 +31,10 @@ use tachyonfx::EffectManager;
 
 use crate::art::{STYLES, Style};
 use crate::backdrop::{BACKDROPS, Backdrop};
-use crate::canvas::{Canvas, LOOKS, Look};
 use crate::fonts::SystemFonts;
 use crate::glyphs::{GlyphSet, Glyphs};
 use crate::stage::Stage;
-use crate::stage::{Act, IDLES, Idle, Logo, Subject, Word};
+use crate::stage::{Act, IDLES, Idle, LOOKS, Logo, Look, Subject, Word};
 use crate::theme::{SHADERS, Shader, THEMES};
 use crate::transition::{Crossing, KINDS};
 
@@ -86,16 +88,29 @@ fn main() -> ExitCode {
     };
     let exit = App::new()
         .add_plugins((
-            MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
-                1.0 / config.fps.max(1.0),
-            ))),
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: None,
+                    exit_condition: ExitCondition::DontExit,
+                    close_when_requested: false,
+                    ..default()
+                })
+                // A handful of small systems: more threads only add overhead.
+                .set(TaskPoolPlugin {
+                    task_pool_options: TaskPoolOptions::with_num_threads(2),
+                })
+                .set(RenderPlugin {
+                    synchronous_pipeline_compilation: true,
+                    ..default()
+                }),
+            ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / config.fps.max(1.0))),
             RatatuiPlugins::default(),
+            gpu::GpuPlugin,
         ))
         .insert_resource(SystemFonts::load())
         .insert_resource(Glyph(Glyphs::new(config.glyphs)))
         .insert_resource(Show::new(config.hold))
         .init_resource::<Effects>()
-        .init_resource::<Frame>()
         .add_systems(PreUpdate, input)
         .add_systems(Update, frame)
         .run();
@@ -108,9 +123,6 @@ fn main() -> ExitCode {
 
 #[derive(Resource)]
 struct Glyph(Glyphs);
-
-#[derive(Resource, Default)]
-struct Frame(Canvas);
 
 /// Effects are `Send` but not `Sync`; with `ResMut` the lock is never contended.
 #[derive(Resource, Default)]
@@ -268,14 +280,13 @@ fn frame(
     mut context: ResMut<RatatuiContext>,
     mut show: ResMut<Show>,
     mut effects: ResMut<Effects>,
-    mut canvas: ResMut<Frame>,
     glyphs: Res<Glyph>,
-    fonts: Res<SystemFonts>,
-    time: Res<Time>,
+    (fonts, time): (Res<SystemFonts>, Res<Time>),
+    mut gpu: gpu::Gpu,
+    gpu_frame: Res<gpu::GpuFrame>,
 ) -> Result {
     let show = &mut *show;
     let effects = effects.0.get_mut().unwrap_or_else(PoisonError::into_inner);
-    let canvas = &mut canvas.0;
     let (t, dt) = (time.elapsed_secs(), time.delta());
     context.draw(|frame| {
         let area = frame.area();
@@ -358,12 +369,10 @@ fn frame(
         }
 
         let Some(stage) = &show.stage else { return };
-        canvas.resize(area.width as usize, area.height as usize);
-        match &show.crossing {
-            Some(crossing) => crossing.render(canvas, stage, t),
-            None => transition::still(canvas, stage, t),
+        gpu.render(&glyphs.0, stage, show.crossing.as_ref(), t);
+        if let Some(cells) = gpu_frame.cells(area.width, area.height) {
+            gpu::draw(cells, frame.buffer_mut());
         }
-        canvas.encode(stage.act.look, &glyphs.0, frame.buffer_mut());
         effects
             .transition
             .process_effects(dt.into(), frame.buffer_mut(), area);

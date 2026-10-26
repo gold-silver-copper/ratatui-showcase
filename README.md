@@ -64,9 +64,18 @@ colours blended in linear light, so edges stay crisp and curves smooth. The
 terminal's pixel size, where it reports one, corrects for the shape of its
 cells, so the art is never stretched.
 
+## How it renders
+
+The CPU lays each scene out (fonts, bitmaps, glow, particle positions) and the
+GPU draws every frame: a [Bevy](https://bevyengine.org) compute shader
+(`src/render.wgsl`) samples the art, runs the shaders, backgrounds and
+transitions, splats particles, matches glyphs and writes one glyph and two
+colours per cell, which are read back for ratatui to print. Bevy runs headless,
+without a window, so a GPU with Vulkan, Metal or DirectX 12 drivers is needed.
+
 ## Credits
 
 The mascot and the `RatatuiLogo` lettering come from `ratatui-widgets`, and the
 rat from ratatui's `assets/logo.svg`, both MIT licensed by the ratatui
 developers. The octant and wedge shapes in `src/glyph_table.rs` were generated
-from foot's `box-drawing.c` (MIT).
+from foot's `box-drawing.c` (MIT) by `tools/gen_glyphs.py`.

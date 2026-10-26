@@ -4,16 +4,16 @@
 
 use std::f32::consts::TAU;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ratatui::layout::Position;
 
-use crate::art::{self, Bitmap, Material, Style};
-use crate::backdrop::Backdrop;
-use crate::canvas::Look;
+use crate::art::{self, Bitmap, Material, Px, Style};
+use crate::backdrop::{BACKDROPS, Backdrop};
 use crate::fonts::{self, Face};
 use crate::glyphs::{COLS, ROWS};
 use crate::num;
-use crate::theme::{Rgb, Shader, THEMES, Theme};
+use crate::theme::{Rgb, SHADERS, Shader, THEMES, Theme};
 
 pub const WORDMARK: &str = "ratatui";
 
@@ -37,6 +37,55 @@ pub enum Subject {
     Word(Word),
     /// Logo and wordmark together.
     Lockup(Logo, Word),
+}
+
+/// How the frame is turned into characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Look {
+    /// Block glyphs matched to each cell's shape, for crisp edges.
+    Smooth,
+    /// Chunky half-block pixels.
+    Pixels,
+    /// Braille dots.
+    Braille,
+    /// Characters by density.
+    Ascii,
+    /// An LED sign.
+    Led,
+}
+
+pub const LOOKS: &[Look] = &[
+    Look::Smooth,
+    Look::Smooth,
+    Look::Smooth,
+    Look::Pixels,
+    Look::Braille,
+    Look::Braille,
+    Look::Ascii,
+    Look::Led,
+];
+
+impl Look {
+    /// The look's number in the shader.
+    pub fn code(self) -> u32 {
+        match self {
+            Look::Smooth => 0,
+            Look::Pixels => 1,
+            Look::Braille => 2,
+            Look::Ascii => 3,
+            Look::Led => 4,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Look::Smooth => "smooth",
+            Look::Pixels => "pixels",
+            Look::Braille => "braille",
+            Look::Ascii => "ascii",
+            Look::Led => "led",
+        }
+    }
 }
 
 /// Gentle motion while a scene holds.
@@ -159,6 +208,16 @@ impl Piece {
 }
 
 /// Which cells hold part of the art, for effects that treat it specially.
+/// Words in a scene's settings block for the GPU.
+pub const BLOCK: usize = 64;
+const MAX_PIECES: usize = 2;
+const MAX_STOPS: usize = 5;
+
+/// An option's position in its list, which the shader switches on.
+fn code<T: PartialEq>(list: &[T], item: T) -> u32 {
+    num::u32_of(list.iter().position(|i| *i == item).unwrap_or(0))
+}
+
 pub struct InkMask {
     width: u16,
     cells: Vec<bool>,
@@ -173,12 +232,9 @@ impl InkMask {
     }
 }
 
-pub struct Shade {
-    pub ink: Rgb,
-    pub glow: f32,
-}
-
 pub struct Stage {
+    /// Unique per stage, to tell when the GPU needs new art.
+    pub id: u64,
     pub act: Act,
     pub cols: u16,
     pub rows: u16,
@@ -257,7 +313,9 @@ impl Stage {
         };
 
         let amplitude = (h * 0.015).max(1.0);
+        static NEXT: AtomicU64 = AtomicU64::new(1);
         let mut stage = Self {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
             act,
             cols,
             rows,
@@ -330,51 +388,105 @@ impl Stage {
             .fold(0.0, f32::max)
     }
 
-    /// The art's colour and glow around screen position `(x, y)`.
-    pub fn shade(&self, x: f32, y: f32, t: f32, row: usize) -> Shade {
-        let theme = self.act.theme();
-        let mut best = Shade {
-            ink: Rgb::BLACK,
-            glow: 0.0,
-        };
-        let mut best_weight = -1.0;
+    /// The art for the GPU: per pixel of each piece's glow-padded grid, its
+    /// ink (bits 0-7), material (8-15), material parameter (16-23) and glow
+    /// (24-31). Pieces follow each other.
+    pub fn texels(&self) -> Vec<u32> {
+        let mut texels = Vec::new();
         for piece in &self.pieces {
-            let (lx, ly) = piece.local(self.act.idle, self.amplitude, x, y, t);
-            let (gx, gy) = (lx + piece.glow_radius, ly + piece.glow_radius);
-            if gx < 0.0 || gy < 0.0 {
-                continue;
+            let r = num::floor_usize(piece.glow_radius);
+            for gy in 0..piece.glow.height {
+                for gx in 0..piece.glow.width {
+                    let px = match (gx.checked_sub(r), gy.checked_sub(r)) {
+                        (Some(x), Some(y)) => piece.bitmap.get(x, y),
+                        _ => Px::default(),
+                    };
+                    let (material, param) = match px.material {
+                        Material::Ink => (0, 0),
+                        Material::Hat => (1, 0),
+                        Material::Eye => (2, 0),
+                        Material::Screen => (3, 0),
+                        Material::Border => (4, 0),
+                        Material::Cursor => (5, 0),
+                        Material::Depth(d) => (6, d),
+                        Material::Reflection(f) => (7, f),
+                    };
+                    let ink = u32::from(num::round_u8(px.ink * 255.0));
+                    let glow = u32::from(num::round_u8(piece.glow.get(gx, gy).ink * 255.0));
+                    texels.push(ink | material << 8 | u32::from(param) << 16 | glow << 24);
+                }
             }
-            let glow = piece
-                .glow
-                .get(num::floor_usize(gx), num::floor_usize(gy))
-                .ink;
-            let px = if lx < 0.0 || ly < 0.0 {
-                Default::default()
-            } else {
-                piece.bitmap.get(num::floor_usize(lx), num::floor_usize(ly))
-            };
-            let weight = px.ink + glow;
-            if weight <= best_weight {
-                continue;
-            }
-            best_weight = weight;
-            let (u, v) = (lx / piece.width().max(1.0), ly / piece.height().max(1.0));
-            let ink = self.act.shader.color(theme, u, v.min(1.0), t, row);
-            let color = match px.material {
-                Material::Ink => ink,
-                Material::Hat => ink.lerp(Rgb::WHITE, 0.75),
-                Material::Eye if t.rem_euclid(5.0) < 0.15 => theme.accent,
-                Material::Eye => theme.background.scale(2.5),
-                Material::Screen => theme.background.lerp(ink, 0.1),
-                Material::Border => ink.scale(0.55),
-                Material::Cursor if (t * 1.2).fract() < 0.5 => theme.accent,
-                Material::Cursor => theme.background.lerp(ink, 0.1),
-                Material::Depth(d) => ink.mix(theme.background, 0.45 + 0.35 * f32::from(d) / 255.0),
-                Material::Reflection(f) => theme.background.mix(ink, f32::from(f) / 255.0),
-            };
-            best = Shade { ink: color, glow };
         }
-        best
+        texels
+    }
+
+    pub fn texels_len(&self) -> usize {
+        self.pieces
+            .iter()
+            .map(|p| p.glow.width.saturating_mul(p.glow.height))
+            .sum()
+    }
+
+    /// The screen's width over its height.
+    pub fn screen_aspect(&self) -> f32 {
+        f32::from(self.cols) / (f32::from(self.rows.max(1)) * self.cell_ratio)
+    }
+
+    /// This scene's settings for the GPU (see `render.wgsl`), with its art
+    /// starting at `art` in the art buffer.
+    pub fn block(&self, art: u32) -> [u32; BLOCK] {
+        let mut block = [0; BLOCK];
+        let theme = self.act.theme();
+        let put = |block: &mut [u32; BLOCK], at: usize, value: u32| {
+            if let Some(slot) = block.get_mut(at) {
+                *slot = value;
+            }
+        };
+        let rgb = |block: &mut [u32; BLOCK], at: usize, c: Rgb| {
+            for (i, v) in [c.0, c.1, c.2].into_iter().enumerate() {
+                put(block, at.saturating_add(i), v.to_bits());
+            }
+        };
+        put(&mut block, 0, code(SHADERS, self.act.shader));
+        put(&mut block, 1, code(BACKDROPS, self.act.backdrop));
+        put(&mut block, 2, code(IDLES, self.act.idle));
+        put(&mut block, 3, self.amplitude.to_bits());
+        put(
+            &mut block,
+            4,
+            num::u32_of(self.pieces.len().min(MAX_PIECES)),
+        );
+        put(&mut block, 5, num::u32_of(theme.stops.len().min(MAX_STOPS)));
+        rgb(&mut block, 8, theme.background);
+        rgb(&mut block, 11, theme.accent);
+        for (i, &stop) in theme.stops.iter().take(MAX_STOPS).enumerate() {
+            rgb(
+                &mut block,
+                14_usize.saturating_add(i.saturating_mul(3)),
+                Rgb::hex(stop),
+            );
+        }
+        let mut offset = art;
+        for (i, piece) in self.pieces.iter().take(MAX_PIECES).enumerate() {
+            let at = 32_usize.saturating_add(i.saturating_mul(8));
+            let fields = [
+                piece.x.to_bits(),
+                piece.y.to_bits(),
+                num::u32_of(piece.bitmap.width),
+                num::u32_of(piece.bitmap.height),
+                num::floor_u32(piece.glow_radius),
+                offset,
+                num::u32_of(piece.glow.width),
+                num::u32_of(piece.glow.height),
+            ];
+            for (j, value) in fields.into_iter().enumerate() {
+                put(&mut block, at.saturating_add(j), value);
+            }
+            offset = offset.saturating_add(num::u32_of(
+                piece.glow.width.saturating_mul(piece.glow.height),
+            ));
+        }
+        block
     }
 }
 

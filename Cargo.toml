@@ -8,8 +8,9 @@ repository = "https://github.com/gold-silver-copper/ratatui-showcase"
 
 [dependencies]
 ab_glyph = "0.2.32"
-bevy = { version = "0.20.0", default-features = false }
+bevy = { version = "0.20.0", default-features = false, features = ["async_executor", "bevy_asset", "bevy_image", "bevy_render", "bevy_shader", "bevy_window", "multi_threaded", "std"] }
 bevy_ratatui = "0.13.0"
+bytemuck = "1.25.2"
 fastrand = "2.5.0"
 font8x8 = "0.3.1"
 fontdb = "0.24.0"
@@ -62,3 +63,6 @@ cast_possible_wrap = "forbid"
 cast_sign_loss = "forbid"
 arithmetic_side_effects = "forbid"
 disallowed_methods = "forbid"
+
+[dev-dependencies]
+naga = { version = "30.0.1", features = ["wgsl-in"] }
