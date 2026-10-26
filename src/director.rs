@@ -7,10 +7,9 @@ use crate::art::{STYLES, Style};
 use crate::backdrop::{BACKDROPS, Backdrop};
 use crate::fonts::{Face, SystemFonts};
 use crate::stage::{
-    self, Act, IDLES, Idle, LOOKS, Logo, Look, MODES, Mode, PHRASES, POSTS, Post, Subject, Word,
+    self, Act, IDLES, Idle, LOOKS, Logo, Look, MODES, Mode, POSTS, Post, Subject, Word,
 };
 use crate::theme::{Palette, SHADERS, Shader, THEMES};
-use crate::widgets::{PANELS, Panel};
 
 /// Scenes remembered, so the next few don't repeat them.
 const MEMORY: usize = 4;
@@ -260,8 +259,7 @@ impl Director {
     }
 }
 
-/// Alternates logo and wordmark, sometimes both together; now and then a
-/// phrase or real widgets instead.
+/// Alternates logo and wordmark, sometimes both together.
 fn subject(current: &Act, fonts: &SystemFonts) -> Subject {
     let face = || fonts.pick(stage::WORDMARK).map_or(Word::Pixel, Word::Face);
     let word = || match fastrand::u8(0..8) {
@@ -285,26 +283,12 @@ fn subject(current: &Act, fonts: &SystemFonts) -> Subject {
             Logo::Emblem
         }
     };
-    let roll = fastrand::u8(0..100);
-    if roll < 10 && !matches!(current.subject, Subject::Widget(..)) {
-        let panel = fresh(PANELS, &[]).unwrap_or(Panel::Bars);
-        return Subject::Widget(panel, fastrand::u64(..));
-    }
-    if roll < 20 && !matches!(current.subject, Subject::Phrase(..)) {
-        let text = fresh(PHRASES, &[]).unwrap_or(stage::WORDMARK);
-        let style = if fastrand::u8(0..5) == 0 {
-            word()
-        } else {
-            face()
-        };
-        return Subject::Phrase(text, style);
-    }
     match (&current.subject, fastrand::u8(0..4)) {
         (Subject::Lockup(..), n) if n < 2 => Subject::Logo(logo()),
         (Subject::Lockup(..), _) => Subject::Word(word()),
         (_, 0) => Subject::Lockup(logo(), word()),
         (Subject::Logo(_), _) => Subject::Word(word()),
-        (Subject::Word(_) | Subject::Phrase(..) | Subject::Widget(..), _) => Subject::Logo(logo()),
+        (Subject::Word(_), _) => Subject::Logo(logo()),
     }
 }
 
