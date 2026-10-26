@@ -43,25 +43,40 @@ fn neighbours(base: u32, gx: i32, gy: i32) -> array<vec4<f32>, 4> {
 fn fluid_advect(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
     let i = thread(id, groups);
     if i >= grid_w() * grid_h() { return; }
-    if reset() {
-        state[at(H_SIM1, i)] = vec4(0.0);
-        state[at(H_SIM3, i)] = vec4(0.0);
-        return;
-    }
     let p = grid_point(i);
     let t = time();
+    let dissolving = kind() == K_DISSOLVE;
+    let inky = mode(sim_scene()) == M_INK && !dissolving;
+    if reset() {
+        // Dissolving: the old scene's art becomes the dye; ink starts as
+        // the letters.
+        var dye = vec3(0.0);
+        if dissolving {
+            let a = art(H_FROM, 0u, p.x, p.y, t, u32(p.y / 4.0));
+            dye = a.color * a.alpha + a.glow;
+        } else if inky && inside_sim(p) {
+            dye = ink_at(sim_scene(), p.x, p.y, t);
+        }
+        state[at(H_SIM1, i)] = vec4(0.0);
+        state[at(H_SIM3, i)] = vec4(dye, 1.0);
+        return;
+    }
     let v = state[at(H_SIM0, i)].xy;
     let back = p - v * SIM_DT * 2.0;
     var velocity = grid_sample(H_SIM0, back).xy * 0.994;
-    var dye = grid_sample(H_SIM2, back).rgb * 0.982;
+    var dye = grid_sample(H_SIM2, back).rgb * select(0.982, 0.996, kind() == K_DISSOLVE || inky);
     // Eddies: the curl of drifting noise, which swirls without pushing the
     // dye anywhere in particular.
     let q = p * 0.025 + vec2(t * 0.07, -t * 0.05);
     let e = 0.5;
     let dx = fbm(q + vec2(e, 0.0)) - fbm(q - vec2(e, 0.0));
     let dy = fbm(q + vec2(0.0, e)) - fbm(q - vec2(0.0, e));
-    velocity += vec2(dy, -dx) * 240.0 * SIM_DT;
-    if inside_sim(p) {
+    velocity += vec2(dy, -dx) * select(select(240.0, 70.0, inky), 900.0, dissolving) * SIM_DT;
+    if inky {
+        // Ink is light: it rises, and the letters keep seeping a little.
+        velocity.y -= luma(dye) * 260.0 * SIM_DT;
+        if inside_sim(p) { dye = mix(dye, ink_at(sim_scene(), p.x, p.y, t), 0.015); }
+    } else if !dissolving && inside_sim(p) {
         dye = mix(dye, ink_at(sim_scene(), p.x, p.y, t) * 0.85, 0.1);
     }
     state[at(H_SIM1, i)] = vec4(velocity, 0.0, 0.0);
@@ -225,7 +240,7 @@ fn fire(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) g
     let drift = i32(floor(r * 3.0)) - 1;
     let below = grid_load(src, gx + drift, gy + 1);
     var heat: f32;
-    if inside_sim(p) {
+    if fire_source(p) {
         heat = 0.8 + 0.2 * r;
     } else if gy == i32(grid_h()) - 1 {
         heat = 0.45 * r;
@@ -235,6 +250,16 @@ fn fire(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) g
     // Smoke: what the flames lose rises on, slowly thinning.
     let smoke = below.y * 0.975 + max(below.x - max(heat, 0.0), 0.0) * 0.35;
     state[at(dst, i)] = vec4(max(heat, 0.0), clamp(smoke, 0.0, 1.0), 0.0, 0.0);
+}
+
+/// Where the fire is fed: the scene's art, or during an inferno the edge
+/// where the old scene is burning away.
+fn fire_source(p: vec2<f32>) -> bool {
+    if kind() == K_INFERNO {
+        let m = wipe_mix(p.x / width(), p.y / height());
+        return m > 0.03 && m < 0.55;
+    }
+    return inside_sim(p);
 }
 
 // ---------------------------------------------------------------- ripples
@@ -275,7 +300,7 @@ fn sim_art(s: u32, layer: u32, x: f32, y: f32, t: f32, row: u32, latest: u32) ->
     var out = Art(vec3(0.0), 0.0, vec3(0.0), 0.0, 0.0);
     let p = vec2(x, y);
     switch mode(s) {
-        case M_FLUID: {
+        case M_FLUID, M_INK: {
             let dye = grid_sample(H_SIM2, p).rgb;
             let strength = max(dye.r, max(dye.g, dye.b));
             out.alpha = clamp(strength * 1.6, 0.0, 1.0);
@@ -305,6 +330,33 @@ fn sim_art(s: u32, layer: u32, x: f32, y: f32, t: f32, row: u32, latest: u32) ->
             let fumes = mixl(background(s) * 2.5, vec3(0.35), 0.5);
             out.color = select(select(fumes, fire_color(s, heat), flame >= smoke), ember, a.alpha > 0.5);
             out.glow = fire_color(s, heat) * heat * 0.25;
+        }
+        case M_SLIME: {
+            let v = grid_sample(latest, p).x;
+            let ink = ink_at(s, x, y, t);
+            out.alpha = clamp(v * 1.3, 0.0, 1.0);
+            out.color = mixl(ink * 0.7, lerp(ink, WHITE, 0.45), clamp(v - 0.6, 0.0, 1.0));
+            out.glow = ink * clamp(v, 0.0, 1.0) * 0.12;
+        }
+        case M_SAND: {
+            let grain = grid_load(latest, i32(x / 2.0), i32(y / 2.0));
+            out.alpha = select(0.0, 1.0, grain.x > 0.5);
+            out.color = grain.yzw * select(0.85, 1.0, grain.x > 1.5);
+        }
+        case M_CRYSTAL: {
+            let stuck = grid_load(H_SIM0, i32(x / 2.0), i32(y / 2.0)).x;
+            let ghost = art(s, layer, x, y, t, row);
+            let ink = ink_at(s, x, y, t);
+            if stuck > 0.0 {
+                // Newest growth glows white, older ice takes the ink's colour.
+                let grown = t + 1.0 - stuck;
+                out.color = lerp(mixl(ink, accent(s), 0.25), WHITE, exp(-grown * 1.5) * 0.8);
+                out.alpha = 1.0;
+                out.glow = ink * 0.08;
+            } else {
+                out.color = ghost.color;
+                out.alpha = ghost.alpha * 0.12;
+            }
         }
         default: {}
     }
@@ -343,4 +395,196 @@ fn snapshot(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroup
 fn frozen(x: f32, y: f32) -> Art {
     let v = grid_sample(H_SNAPSHOT, vec2(x, y));
     return Art(v.rgb / max(v.a, 1e-3), v.a, vec3(0.0), 0.0, 0.0);
+}
+
+// ---------------------------------------------------------------- slime mold
+//
+// Agents that each sense the trail ahead, to the left and to the right,
+// turn toward the strongest, step forward and leave more trail; the trail
+// spreads and fades. The letters smell of trail too, so the network the
+// agents weave draws them.
+
+fn agent_slot(i: u32) -> u32 { return params[H_AGENTS] + i; }
+
+/// A random point in the scene's art, or anywhere if none turns up.
+fn random_inside(i: u32, salt: u32) -> vec2<f32> {
+    var p = vec2(hash(i, salt) * width(), hash(i, salt + 1u) * height());
+    for (var k = 0u; k < 8u; k++) {
+        let q = vec2(hash(i, salt + 2u + k * 2u) * width(), hash(i, salt + 3u + k * 2u) * height());
+        if inside_sim(q) { return q; }
+    }
+    return p;
+}
+
+fn trail(base: u32, p: vec2<f32>) -> f32 {
+    // The letters attract; away from them is bare ground, where trails
+    // count for less.
+    let t = grid_sample(base, p).x;
+    return select(t * 0.25 - 0.6, t + 1.2, inside_sim(p));
+}
+
+@compute @workgroup_size(64)
+fn slime_agents(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
+    if i >= AGENTS { return; }
+    let src = sim_src();
+    if reset() {
+        state[agent_slot(i)] = vec4(random_inside(i, 51u), hash(i, 71u) * TAU, 0.0);
+        return;
+    }
+    let a = state[agent_slot(i)];
+    var pos = a.xy;
+    var angle = a.z;
+    let reach = 9.0;
+    let spread = 0.55;
+    let ahead = trail(src, pos + vec2(cos(angle), sin(angle)) * reach);
+    let left = trail(src, pos + vec2(cos(angle - spread), sin(angle - spread)) * reach);
+    let right = trail(src, pos + vec2(cos(angle + spread), sin(angle + spread)) * reach);
+    let turn = 0.45;
+    if ahead < left && ahead < right {
+        angle += select(-turn, turn, hash3(i, step_seed(), 13u) < 0.5);
+    } else if left > right && left > ahead {
+        angle -= turn;
+    } else if right > left && right > ahead {
+        angle += turn;
+    }
+    pos += vec2(cos(angle), sin(angle)) * 1.2;
+    // Edges turn the agent around.
+    if pos.x < 1.0 || pos.y < 1.0 || pos.x > width() - 1.0 || pos.y > height() - 1.0 {
+        pos = clamp(pos, vec2(1.0), vec2(width(), height()) - 1.0);
+        angle += PI * (0.8 + 0.4 * hash3(i, step_seed(), 17u));
+    }
+    state[agent_slot(i)] = vec4(pos, angle, 0.0);
+    // Leave trail where it stands; neighbours writing at once only lose a
+    // little.
+    let g = grid_index(u32(pos.x / 2.0), u32(pos.y / 2.0));
+    state[at(src, g)].x = min(state[at(src, g)].x + select(0.03, 0.12, inside_sim(pos)), 3.0);
+}
+
+@compute @workgroup_size(64)
+fn slime_diffuse(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
+    if i >= grid_w() * grid_h() { return; }
+    let dst = sim_dst();
+    if reset() { state[at(dst, i)] = vec4(0.0); return; }
+    let src = sim_src();
+    let gx = i32(i % grid_w());
+    let gy = i32(i / grid_w());
+    var sum = 0.0;
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) { sum += grid_load(src, gx + dx, gy + dy).x; }
+    }
+    state[at(dst, i)] = vec4(sum / 9.0 * 0.9, 0.0, 0.0, 0.0);
+}
+
+// ---------------------------------------------------------------- sand
+//
+// The letters are glued sand; from the top down the glue lets go and the
+// grains fall and pile up. Grains move in 2 x 2 blocks (a Margolus
+// neighbourhood), shifted by one every other step, so no grain is ever
+// moved twice or lost: each grid point is (0 empty, 1 loose, 2 glued, the
+// grain's colour).
+
+@compute @workgroup_size(64)
+fn sand(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
+    let blocks_w = grid_w() / 2u + 1u;
+    if i >= blocks_w * (grid_h() / 2u + 1u) { return; }
+    let shift = i32((mark(MARK_PARITY) + FLIP) & 1u);
+    let x0 = i32(i % blocks_w) * 2 - shift;
+    let y0 = i32(i / blocks_w) * 2 - shift;
+    let src = sim_src();
+    let dst = sim_dst();
+    var cells: array<vec4<f32>, 4>;
+    var inside_grid: array<bool, 4>;
+    for (var k = 0; k < 4; k++) {
+        let x = x0 + k % 2;
+        let y = y0 + k / 2;
+        inside_grid[k] = x >= 0 && y >= 0 && x < i32(grid_w()) && y < i32(grid_h());
+        // Off the grid is solid wall.
+        cells[k] = vec4(3.0, 0.0, 0.0, 0.0);
+        if inside_grid[k] {
+            let g = grid_index(u32(x), u32(y));
+            if reset() {
+                let p = grid_point(g);
+                cells[k] = select(vec4(0.0), vec4(2.0, ink_at(sim_scene(), p.x, p.y, time())), inside_sim(p));
+            } else {
+                cells[k] = state[at(src, g)];
+                // The glue lets go from the top down.
+                let due = 1.2 + f32(y) / f32(grid_h()) * 2.5 + hash(g, 81u) * 0.8;
+                if cells[k].x > 1.5 && age(sim_scene()) > due { cells[k].x = 1.0; }
+            }
+        }
+    }
+    if !reset() {
+        // Fall straight down where there is room, else slide off sideways.
+        if cells[0].x == 1.0 && cells[2].x == 0.0 { let c = cells[0]; cells[0] = cells[2]; cells[2] = c; }
+        if cells[1].x == 1.0 && cells[3].x == 0.0 { let c = cells[1]; cells[1] = cells[3]; cells[3] = c; }
+        let right_first = hash3(i, step_seed(), 5u) < 0.5;
+        if right_first && cells[0].x == 1.0 && cells[3].x == 0.0 && cells[2].x != 0.0 {
+            let c = cells[0]; cells[0] = cells[3]; cells[3] = c;
+        }
+        if cells[1].x == 1.0 && cells[2].x == 0.0 && cells[3].x != 0.0 {
+            let c = cells[1]; cells[1] = cells[2]; cells[2] = c;
+        }
+        if !right_first && cells[0].x == 1.0 && cells[3].x == 0.0 && cells[2].x != 0.0 {
+            let c = cells[0]; cells[0] = cells[3]; cells[3] = c;
+        }
+    }
+    for (var k = 0; k < 4; k++) {
+        if inside_grid[k] {
+            state[at(dst, grid_index(u32(x0 + k % 2), u32(y0 + k / 2)))] = cells[k];
+        }
+    }
+}
+
+// ---------------------------------------------------------------- crystal
+//
+// Growth by diffusion-limited aggregation: walkers wander at random inside
+// the letters and freeze where they touch the crystal, so it branches out
+// from a few seeds until the letters fill. The crystal (SIM0) holds the
+// time each point froze, plus one.
+
+@compute @workgroup_size(64)
+fn crystal(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
+    if reset() {
+        if i < grid_w() * grid_h() {
+            let p = grid_point(i);
+            let seed = inside_sim(p) && hash(i, 61u) < 0.0012;
+            state[at(H_SIM0, i)] = vec4(select(0.0, time() + 1.0, seed), 0.0, 0.0, 0.0);
+        }
+        if i < AGENTS { state[agent_slot(i)] = vec4(random_inside(i, 91u), 0.0, 0.0); }
+        return;
+    }
+    // A thousand walkers: the crystal branches, and the letters take
+    // seconds to fill, not a blink.
+    if i >= AGENTS / 64u { return; }
+    var pos = state[agent_slot(i)].xy;
+    for (var k = 0u; k < 3u; k++) {
+        // A walker that found no room in the art waits outside it; it must
+        // never freeze there, or frozen walkers would spread across the
+        // screen.
+        if !inside_sim(pos) {
+            pos = random_inside(i, 131u + step_seed() * 7u + k);
+            continue;
+        }
+        let r = hash3(i, step_seed() * 8u + k, 29u);
+        let step = vec2(cos(r * TAU), sin(r * TAU)) * 2.0;
+        if inside_sim(pos + step) { pos += step; }
+        let gx = i32(pos.x / 2.0);
+        let gy = i32(pos.y / 2.0);
+        var touching = false;
+        for (var dy = -1; dy <= 1; dy++) {
+            for (var dx = -1; dx <= 1; dx++) {
+                if grid_load(H_SIM0, gx + dx, gy + dy).x > 0.0 { touching = true; }
+            }
+        }
+        if touching {
+            let g = grid_index(u32(clamp(gx, 0, i32(grid_w()) - 1)), u32(clamp(gy, 0, i32(grid_h()) - 1)));
+            if state[at(H_SIM0, g)].x == 0.0 { state[at(H_SIM0, g)] = vec4(time() + 1.0, 0.0, 0.0, 0.0); }
+            pos = random_inside(i, 101u + step_seed() * 3u + k);
+        }
+    }
+    state[agent_slot(i)] = vec4(pos, 0.0, 0.0);
 }

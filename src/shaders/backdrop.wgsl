@@ -239,6 +239,140 @@ fn menger_sponge(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
     return sample(s, d * 0.12 + t * 0.02) * pow(occlusion, 1.4) * fog + background(s) * (1.0 - fog);
 }
 
+// ---------------------------------------------------------------- more 2D and 3D
+
+fn terrain_height(p: vec2<f32>) -> f32 {
+    let q = p + vec2(500.0, 500.0);
+    return fbm(q * 0.35) * 2.4 + value_noise(q * 1.9) * 0.12;
+}
+
+/// Flying low over hills, lit by a low sun, fading into haze.
+fn terrain(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
+    let uv = vec2((x - 0.5) * pf(H_ASPECT), 0.5 - y);
+    let ro = vec3(0.4 * sin(t * 0.05), 2.4, t * 1.1);
+    let rd = normalize(vec3(uv.x, uv.y - 0.22, 1.0));
+    let sun = normalize(vec3(-0.5, 0.3, 1.0));
+    let sky = mixl(background(s) * 1.4, sample(s, 0.2) * 0.55, clamp(uv.y * 1.5 + 0.35, 0.0, 1.0))
+        + sample(s, 0.05) * (pow(max(dot(rd, sun), 0.0), 900.0) * 0.8 + pow(max(dot(rd, sun), 0.0), 12.0) * 0.15);
+    var d = 0.3;
+    for (var i = 0; i < 64; i++) {
+        let p = ro + rd * d;
+        let h = terrain_height(p.xz);
+        let gap = p.y - h;
+        if gap < 0.003 * d {
+            let e = 0.06;
+            let n = normalize(vec3(terrain_height(p.xz - vec2(e, 0.0)) - terrain_height(p.xz + vec2(e, 0.0)), 2.0 * e,
+                terrain_height(p.xz - vec2(0.0, e)) - terrain_height(p.xz + vec2(0.0, e))));
+            let lit = sample(s, h * 0.3 + 0.1) * (0.2 + 0.95 * max(dot(n, sun), 0.0));
+            return mixl(lit, sky, 1.0 - exp(-d * 0.07));
+        }
+        d += max(gap * 0.45, 0.02);
+        if d > 28.0 { break; }
+    }
+    return sky;
+}
+
+/// Blobs drifting on slow orbits; where their fields add past a threshold
+/// they merge, with a bright rim.
+fn metaballs(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
+    let aspect = pf(H_ASPECT);
+    let p = vec2((x - 0.5) * aspect, y - 0.5);
+    var field = 0.0;
+    var tint = vec3(0.0);
+    for (var k = 0; k < 7; k++) {
+        let fk = f32(k);
+        let c = vec2(sin(t * 0.21 * (1.0 + fk * 0.13) + fk * 1.7) * 0.42 * aspect, cos(t * 0.17 * (1.0 + fk * 0.11) + fk * 2.3) * 0.36);
+        let r = 0.08 + 0.035 * sin(fk * 3.1 + 1.0);
+        let f = r * r / max(dot(p - c, p - c), 1e-5);
+        field += f;
+        tint += sample(s, fk / 7.0 + t * 0.01) * f;
+    }
+    tint /= max(field, 1e-4);
+    let inside = smoothstep(0.9, 1.1, field);
+    let rim = exp(-pow((field - 1.0) * 4.0, 2.0));
+    return background(s) * 0.7 + tint * (inside * 0.45 + rim * 0.7 + min(field, 1.0) * 0.08);
+}
+
+/// Stained glass: cells around drifting points, each its own colour,
+/// brightest at the middle, with dark leading between.
+fn stained_glass(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
+    let p = vec2((x - 0.5) * pf(H_ASPECT), y - 0.5) * 7.0 + vec2(40.0);
+    let g = floor(p);
+    let f = p - g;
+    var d1 = 9.0;
+    var d2 = 9.0;
+    var id = vec2(0.0);
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+            let cell = g + vec2(f32(i), f32(j));
+            let h = vec2(hashf(cell.x, cell.y), hashf(cell.x + 31.0, cell.y + 17.0));
+            let site = vec2(f32(i), f32(j)) + 0.5 + 0.38 * sin(t * 0.25 + h * TAU);
+            let d = length(site - f);
+            if d < d1 { d2 = d1; d1 = d; id = cell; } else if d < d2 { d2 = d; }
+        }
+    }
+    let glass = sample(s, hashf(id.x, id.y) + t * 0.01) * (0.45 + 0.5 * (1.0 - d1));
+    return mixl(background(s) * 0.25, glass * 0.8, smoothstep(0.03, 0.09, d2 - d1));
+}
+
+/// Marbled paper: noise warped by noise warped by noise.
+fn marbling(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
+    let p = vec2((x - 0.5) * pf(H_ASPECT), y - 0.5) * 2.6 + vec2(10.0);
+    let q = vec2(fbm(p + vec2(0.0, t * 0.04)), fbm(p + vec2(5.2, 1.3) - vec2(t * 0.03)));
+    let r = vec2(fbm(p + 4.0 * q + vec2(1.7, 9.2) + vec2(t * 0.02)), fbm(p + 4.0 * q + vec2(8.3, 2.8)));
+    let v = fbm(p + 4.0 * r);
+    return sample(s, v * 1.5 + length(q) * 0.6 + t * 0.01) * (0.25 + 0.8 * v * v);
+}
+
+/// Distance to the edges of a fractal folded by `fold` and inverted in the
+/// unit circle by `k`, and how much it was scaled, in the plane's units.
+fn inverted(p0: vec2<f32>, k: f32, kleinian: bool, box: vec2<f32>) -> vec2<f32> {
+    var p = p0;
+    var scale = 1.0;
+    for (var i = 0; i < 10; i++) {
+        if kleinian {
+            p = 2.0 * clamp(p, -box, box) - p;
+        } else {
+            p = -1.0 + 2.0 * fract(0.5 * p + 0.5);
+        }
+        let r2 = max(dot(p, p), 1e-5);
+        let f = select(k / r2, max(k / r2, 1.0), kleinian);
+        p *= f;
+        scale *= f;
+    }
+    return vec2(0.25 * abs(p.y) / scale, scale);
+}
+
+/// The Apollonian gasket (circles in circles), or a pseudo-Kleinian limit
+/// set (box folds and inversions), its edges lit, zooming in and back.
+fn gasket(s: u32, x: f32, y: f32, t: f32, kleinian: bool) -> vec3<f32> {
+    let zoom = exp(-(0.5 - 0.5 * cos(t * TAU / 90.0)) * 3.5);
+    let centre = select(vec2(0.3, 0.2), vec2(0.0, 0.62), kleinian);
+    let p = centre + vec2((x - 0.5) * pf(H_ASPECT), y - 0.5) * 2.4 * zoom;
+    let box = vec2(0.92 + 0.04 * sin(t * 0.07), 0.9);
+    let r = inverted(p, select(1.15 + 0.06 * sin(t * 0.11), 1.0, kleinian), kleinian, box);
+    let pixel = 2.4 * zoom / f32(grid_h());
+    let edge = exp(-r.x / pixel * 0.9);
+    let shade = sample(s, log2(r.y) * 0.07 + t * 0.015);
+    return background(s) * 0.6 + shade * (edge * 0.95 + 0.12);
+}
+
+/// The scene's own art, small, in staggered rows drifting across.
+fn tiles(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
+    if params[s + S_PIECES] == 0u { return background(s); }
+    let p = piece(s, 0u);
+    let tile_w = width() / 5.0;
+    let scale = tile_w / max(p.w, 1.0);
+    let span_x = tile_w * 1.3;
+    let span_y = p.h * scale * 1.5;
+    var q = vec2(x * width() + t * 14.0, y * height() + t * 5.0);
+    let row = floor(q.y / span_y);
+    q.x += row * span_x * 0.5;
+    let local = vec2(wrap(q.x / span_x) * span_x, wrap(q.y / span_y) * span_y) / scale;
+    let ink = f32(texel(p, local) & 0xffu) / 255.0;
+    return background(s) * 0.8 + sample(s, row * 0.13 + floor(q.x / span_x) * 0.07 + t * 0.02) * ink * 0.3;
+}
+
 /// Background at `(x, y)` in 0..1, half-cell pixel `(px, py)`.
 fn backdrop(s: u32, x: f32, y: f32, px: u32, py: u32, t: f32) -> vec3<f32> {
     let aspect = pf(H_ASPECT);
@@ -286,14 +420,21 @@ fn backdrop(s: u32, x: f32, y: f32, px: u32, py: u32, t: f32) -> vec3<f32> {
         case B_WARP: { return warp_stars(s, x, y, t); }
         case B_MANDELBULB: { return mandelbulb(s, x, y, t) * 0.75; }
         case B_MENGER: { return menger_sponge(s, x, y, t) * 0.75; }
+        case B_TERRAIN: { return terrain(s, x, y, t) * 0.8; }
+        case B_METABALLS: { return metaballs(s, x, y, t) * 0.75; }
+        case B_VORONOI: { return stained_glass(s, x, y, t) * 0.7; }
+        case B_MARBLE: { return marbling(s, x, y, t) * 0.7; }
+        case B_APOLLONIAN: { return gasket(s, x, y, t, false) * 0.75; }
+        case B_KLEINIAN: { return gasket(s, x, y, t, true) * 0.75; }
+        case B_TILES: { return tiles(s, x, y, t); }
         // Flames and attractors are drawn over this from their histogram.
-        case B_FLAME, B_CLIFFORD, B_DE_JONG, B_LORENZ: { return background(s) * 0.7 + vec3(dither); }
+        case B_FLAME, B_CLIFFORD, B_DE_JONG, B_LORENZ, B_PARTICLE_LIFE: { return background(s) * 0.7 + vec3(dither); }
         default: { return base; }
     }
 }
 
 /// Whether a backdrop is drawn by splatting points (flames, attractors).
-fn splatted(s: u32) -> bool { let b = params[s + S_BACKDROP]; return b >= B_FLAME && b <= B_LORENZ; }
+fn splatted(s: u32) -> bool { let b = params[s + S_BACKDROP]; return b >= B_FLAME && b <= B_PARTICLE_LIFE; }
 
 /// Backgrounds for the grid, for the scene to sample: the new scene's
 /// always, the old one's while a transition shows it.

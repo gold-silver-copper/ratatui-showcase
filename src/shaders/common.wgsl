@@ -17,6 +17,24 @@
 @group(0) @binding(6) var<storage, read_write> hist: array<atomic<u32>>;
 // The final image of this frame and of the last, packed to 8 bits a channel.
 @group(0) @binding(7) var<storage, read_write> frames: array<u32>;
+// Particles counted per 16 x 16 samples: for each of particle life's four
+// kinds a count and summed position, then the boids' count, summed
+// velocity and position. Positions are summed in half samples, velocities
+// as signed fixed point.
+@group(0) @binding(8) var<storage, read_write> bins: array<atomic<u32>>;
+const BIN: f32 = 16.0;
+const BIN_WORDS: u32 = 17u;
+const BIN_BOIDS: u32 = 12u;
+
+fn bins_w() -> u32 { return (img_w() + 15u) / 16u; }
+fn bins_h() -> u32 { return (img_h() + 15u) / 16u; }
+/// The first word of bin `(bx, by)`, clamped to the grid of bins.
+fn bin_at(bx: i32, by: i32) -> u32 {
+    let x = u32(clamp(bx, 0, i32(bins_w()) - 1));
+    let y = u32(clamp(by, 0, i32(bins_h()) - 1));
+    return (y * bins_w() + x) * BIN_WORDS;
+}
+fn bin_of(p: vec2<f32>) -> vec2<i32> { return vec2<i32>(floor(p / BIN)); }
 
 // Pipeline constants: jump size for distance fields or bloom level, and
 // which of two buffers a ping-pong pass reads.

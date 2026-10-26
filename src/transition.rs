@@ -7,7 +7,7 @@
 use crate::backdrop::hash;
 use crate::glyphs::{COLS, ROWS};
 use crate::num;
-use crate::stage::Stage;
+use crate::stage::{Mode, Stage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
@@ -54,6 +54,18 @@ pub enum Kind {
     Crumble,
     /// The old shape melts into the new one.
     Melt,
+    /// The old scene breaks like glass and falls away.
+    Shatter,
+    /// The old scene peels off like a page, from a corner.
+    Curl,
+    /// Rows smear into sorted streaks and back.
+    Sort,
+    /// The new scene spreads like ink soaking into paper.
+    Bleed,
+    /// The fire simulation burns the old scene away.
+    Inferno,
+    /// The old scene dissolves into the fluid simulation as dye.
+    Dissolve,
 }
 
 /// Every kind once, in the shader's order (`K_*`).
@@ -80,6 +92,12 @@ pub const ALL: &[Kind] = &[
     Kind::Vortex,
     Kind::Crumble,
     Kind::Melt,
+    Kind::Shatter,
+    Kind::Curl,
+    Kind::Sort,
+    Kind::Bleed,
+    Kind::Inferno,
+    Kind::Dissolve,
 ];
 
 /// The kinds to pick from; melts come up twice as often.
@@ -107,6 +125,12 @@ pub const KINDS: &[Kind] = &[
     Kind::Crumble,
     Kind::Melt,
     Kind::Melt,
+    Kind::Shatter,
+    Kind::Curl,
+    Kind::Sort,
+    Kind::Bleed,
+    Kind::Inferno,
+    Kind::Dissolve,
 ];
 
 impl Kind {
@@ -134,6 +158,12 @@ impl Kind {
             Kind::Vortex => "vortex",
             Kind::Crumble => "crumble",
             Kind::Melt => "melt",
+            Kind::Shatter => "shatter",
+            Kind::Curl => "page curl",
+            Kind::Sort => "pixel sort",
+            Kind::Bleed => "ink bleed",
+            Kind::Inferno => "inferno",
+            Kind::Dissolve => "dissolve",
         }
     }
 
@@ -146,6 +176,9 @@ impl Kind {
             Kind::Morph | Kind::Vortex | Kind::Scatter => 2.8,
             Kind::Swarm | Kind::Pour | Kind::Crumble => 3.2,
             Kind::Melt => 2.6,
+            Kind::Shatter | Kind::Curl | Kind::Bleed => 2.4,
+            Kind::Sort => 2.0,
+            Kind::Inferno | Kind::Dissolve => 3.2,
         }
     }
 
@@ -153,6 +186,35 @@ impl Kind {
     pub fn code(self) -> u32 {
         let index = ALL.iter().position(|&k| k == self).unwrap_or(0);
         num::u32_of(index.saturating_add(1))
+    }
+
+    /// The simulation the transition runs itself, which neither scene may
+    /// be using.
+    pub fn simulation(self) -> Option<Mode> {
+        match self {
+            Kind::Inferno => Some(Mode::Fire),
+            Kind::Dissolve => Some(Mode::Fluid),
+            Kind::Wipe(_)
+            | Kind::Burn
+            | Kind::Zoom
+            | Kind::Swirl
+            | Kind::Ripple
+            | Kind::Mosaic
+            | Kind::Slices
+            | Kind::Glitch
+            | Kind::Crt
+            | Kind::Morph
+            | Kind::Swarm
+            | Kind::Scatter
+            | Kind::Pour
+            | Kind::Vortex
+            | Kind::Crumble
+            | Kind::Melt
+            | Kind::Shatter
+            | Kind::Curl
+            | Kind::Sort
+            | Kind::Bleed => None,
+        }
     }
 
     fn particles(self) -> bool {
@@ -261,7 +323,13 @@ impl Crossing {
             | Kind::Pour
             | Kind::Vortex
             | Kind::Crumble
-            | Kind::Melt => sources.saturating_add(targets),
+            | Kind::Melt
+            | Kind::Shatter
+            | Kind::Curl
+            | Kind::Sort
+            | Kind::Bleed
+            | Kind::Inferno
+            | Kind::Dissolve => sources.saturating_add(targets),
         }
     }
 }

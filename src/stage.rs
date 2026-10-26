@@ -13,7 +13,8 @@ use crate::fonts::{self, Face};
 use crate::glyphs::{COLS, ROWS};
 use crate::num;
 use crate::params::{BLOCK, PIECE_LEN, S};
-use crate::theme::{Rgb, SHADERS, Shader, THEMES, Theme};
+use crate::theme::{Palette, SHADERS, Shader};
+use crate::widgets::{self, Panel};
 
 pub const WORDMARK: &str = "ratatui";
 
@@ -29,6 +30,8 @@ pub enum Word {
     Tiny,
     Pixel,
     Face(Face),
+    /// Each letter cut from a different font, like a ransom note.
+    Ransom(Vec<Face>),
 }
 
 #[derive(Clone)]
@@ -37,7 +40,24 @@ pub enum Subject {
     Word(Word),
     /// Logo and wordmark together.
     Lockup(Logo, Word),
+    /// A phrase about ratatui, in a font.
+    Phrase(&'static str, Word),
+    /// Real ratatui widgets, with data from a seed.
+    Widget(Panel, u64),
 }
+
+/// Phrases a scene can spell out instead of the wordmark.
+pub const PHRASES: &[&str] = &[
+    "terminal UIs in Rust",
+    "cargo add ratatui",
+    "ratatui.rs",
+    "cooking up TUIs",
+    "widgets  layouts  style",
+    "immediate mode",
+    "tachyonfx",
+    "bevy_ratatui",
+    "made with ratatui",
+];
 
 /// How the frame is turned into characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +76,12 @@ pub enum Look {
     Shapes,
     /// Falling code, lit by the picture.
     Code,
+    /// Contour lines, like a map's, in box-drawing characters.
+    Contour,
+    /// Printed halftone dots, bigger where it is brighter.
+    Halftone,
+    /// The picture spelled out in this project's README.
+    Text,
 }
 
 pub const LOOKS: &[Look] = &[
@@ -70,6 +96,9 @@ pub const LOOKS: &[Look] = &[
     Look::Led,
     Look::Shapes,
     Look::Code,
+    Look::Contour,
+    Look::Halftone,
+    Look::Text,
 ];
 
 impl Look {
@@ -82,6 +111,9 @@ impl Look {
         Look::Led,
         Look::Shapes,
         Look::Code,
+        Look::Contour,
+        Look::Halftone,
+        Look::Text,
     ];
 
     pub fn code(self) -> u32 {
@@ -97,6 +129,9 @@ impl Look {
             Look::Led => "led",
             Look::Shapes => "shapes",
             Look::Code => "code",
+            Look::Contour => "contour",
+            Look::Halftone => "halftone",
+            Look::Text => "text",
         }
     }
 }
@@ -120,6 +155,16 @@ pub enum Mode {
     Ripple,
     /// A swarm of particles.
     Swarm,
+    /// Slime mold: agents follow each other's trails into the letters.
+    Slime,
+    /// A flock that gathers into the letters.
+    Boids,
+    /// The letters crumble into falling sand.
+    Sand,
+    /// Crystals branch out until they fill the letters.
+    Crystal,
+    /// Ink rising from the letters and curling through water.
+    Ink,
 }
 
 pub const MODES: &[Mode] = &[
@@ -135,6 +180,11 @@ pub const MODES: &[Mode] = &[
     Mode::Fire,
     Mode::Ripple,
     Mode::Swarm,
+    Mode::Slime,
+    Mode::Boids,
+    Mode::Sand,
+    Mode::Crystal,
+    Mode::Ink,
 ];
 
 impl Mode {
@@ -148,17 +198,35 @@ impl Mode {
         Mode::Fire,
         Mode::Ripple,
         Mode::Swarm,
+        Mode::Slime,
+        Mode::Boids,
+        Mode::Sand,
+        Mode::Crystal,
+        Mode::Ink,
     ];
 
     pub fn code(self) -> u32 {
         code(Self::ALL, self)
     }
 
+    /// Whether the mode flies particles around the art (in `Region::Particles`).
+    pub fn flocks(self) -> bool {
+        matches!(self, Mode::Swarm | Mode::Boids)
+    }
+
     /// Whether the mode runs a simulation on the grid.
     pub fn simulates(self) -> bool {
         match self {
-            Mode::Fluid | Mode::Reaction | Mode::Life | Mode::Fire | Mode::Ripple => true,
-            Mode::Flat | Mode::Turntable | Mode::Swarm => false,
+            Mode::Fluid
+            | Mode::Reaction
+            | Mode::Life
+            | Mode::Fire
+            | Mode::Ripple
+            | Mode::Slime
+            | Mode::Sand
+            | Mode::Crystal
+            | Mode::Ink => true,
+            Mode::Flat | Mode::Turntable | Mode::Swarm | Mode::Boids => false,
         }
     }
 
@@ -172,6 +240,11 @@ impl Mode {
             Mode::Fire => "fire",
             Mode::Ripple => "water",
             Mode::Swarm => "swarm",
+            Mode::Slime => "slime mold",
+            Mode::Boids => "boids",
+            Mode::Sand => "sand",
+            Mode::Crystal => "crystal",
+            Mode::Ink => "ink",
         }
     }
 }
@@ -255,9 +328,23 @@ pub enum Idle {
     Sway,
     /// Letters hop one after another.
     Bounce,
+    /// Letters drop into place one after another as the scene starts.
+    Arrive,
+    /// The art scrolls across the screen like a ticker.
+    Marquee,
 }
 
 impl Idle {
+    /// Whether the motion can go with `mode`: the 3D solid holds still, and
+    /// simulations start from the art where it is at first, so it must be
+    /// on screen and stay near there.
+    pub fn suits(self, mode: Mode) -> bool {
+        if mode == Mode::Turntable {
+            return self == Idle::Still;
+        }
+        !(mode.simulates() || mode.flocks()) || !matches!(self, Idle::Arrive | Idle::Marquee)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Idle::Still => "still",
@@ -266,6 +353,8 @@ impl Idle {
             Idle::Breathe => "breathe",
             Idle::Sway => "sway",
             Idle::Bounce => "bounce",
+            Idle::Arrive => "arrive",
+            Idle::Marquee => "marquee",
         }
     }
 }
@@ -277,13 +366,15 @@ pub const IDLES: &[Idle] = &[
     Idle::Breathe,
     Idle::Sway,
     Idle::Bounce,
+    Idle::Arrive,
+    Idle::Marquee,
 ];
 
 /// Everything that makes one scene look the way it does.
 #[derive(Clone)]
 pub struct Act {
     pub subject: Subject,
-    pub theme: usize,
+    pub palette: Palette,
     pub shader: Shader,
     pub backdrop: Backdrop,
     pub look: Look,
@@ -296,11 +387,8 @@ pub struct Act {
 }
 
 impl Act {
-    pub fn theme(&self) -> &'static Theme {
-        THEMES
-            .get(self.theme)
-            .or(THEMES.first())
-            .unwrap_or(&FALLBACK)
+    pub fn theme(&self) -> &Palette {
+        &self.palette
     }
 
     pub fn label(&self) -> String {
@@ -309,6 +397,7 @@ impl Act {
             Word::Tiny => "RatatuiLogo::tiny()".to_owned(),
             Word::Pixel => "font8x8".to_owned(),
             Word::Face(face) => face.name.clone(),
+            Word::Ransom(_) => "ransom note".to_owned(),
         };
         let logo = |logo: &Logo| match logo {
             Logo::Mascot => "RatatuiMascot",
@@ -318,16 +407,11 @@ impl Act {
             Subject::Logo(l) => logo(l).to_owned(),
             Subject::Word(w) => name(w),
             Subject::Lockup(l, w) => format!("{} + {}", logo(l), name(w)),
+            Subject::Phrase(text, w) => format!("\"{text}\" in {}", name(w)),
+            Subject::Widget(panel, _) => panel.name().to_owned(),
         }
     }
 }
-
-const FALLBACK: Theme = Theme {
-    name: "",
-    background: Rgb::BLACK,
-    stops: &[],
-    accent: Rgb::WHITE,
-};
 
 struct Piece {
     bitmap: Bitmap,
@@ -427,6 +511,19 @@ impl Stage {
                 Kind::Word(Word::Face(face)) => {
                     fonts::rasterize(&face.font, WORDMARK, bw, bh, aspect)
                 }
+                Kind::Word(Word::Ransom(faces)) => fonts::ransom(&faces, WORDMARK, bw, bh, aspect),
+                Kind::Phrase(text, Word::Face(face)) => {
+                    fonts::rasterize(&face.font, text, bw, bh, aspect)
+                }
+                Kind::Phrase(text, Word::Ransom(faces)) => {
+                    fonts::ransom(&faces, text, bw, bh, aspect)
+                }
+                Kind::Phrase(text, Word::Small | Word::Tiny | Word::Pixel) => {
+                    art::pixel_font(text).fit(bw, bh, aspect)
+                }
+                Kind::Widget(panel, seed) => {
+                    widgets::render(panel, seed, bw, bh).fit(bw, bh, aspect)
+                }
             };
             act.style.apply(bitmap)
         };
@@ -444,6 +541,20 @@ impl Stage {
             }
             Subject::Word(word) => {
                 vec![centered(make(Kind::Word(word.clone()), w * 0.88, h * 0.56))]
+            }
+            Subject::Phrase(text, word) => {
+                vec![centered(make(
+                    Kind::Phrase(text, word.clone()),
+                    w * 0.92,
+                    h * 0.42,
+                ))]
+            }
+            Subject::Widget(panel, seed) => {
+                vec![centered(make(
+                    Kind::Widget(*panel, *seed),
+                    w * 0.82,
+                    h * 0.84,
+                ))]
             }
             // Side by side on a wide screen, stacked on a tall one.
             Subject::Lockup(logo, word) if w > h * aspect * 1.3 => {
@@ -618,7 +729,7 @@ impl Stage {
         put(S::Style.at(), self.act.style.code());
         let colors = [theme.background, theme.accent]
             .into_iter()
-            .chain(theme.stops.iter().take(MAX_STOPS).map(|&h| Rgb::hex(h)));
+            .chain(theme.stops.iter().take(MAX_STOPS).copied());
         let channels = colors.flat_map(|c| [c.0, c.1, c.2]);
         for (i, v) in channels.enumerate() {
             put(S::Background.at().saturating_add(i), v.to_bits());
@@ -670,6 +781,8 @@ impl Stage {
 enum Kind {
     Logo(Logo),
     Word(Word),
+    Phrase(&'static str, Word),
+    Widget(Panel, u64),
 }
 
 #[cfg(test)]
@@ -679,7 +792,7 @@ mod tests {
     fn act(subject: Subject) -> Act {
         Act {
             subject,
-            theme: 0,
+            palette: Palette::generated(),
             shader: Shader::Flow,
             backdrop: Backdrop::Vignette,
             look: Look::Smooth,
@@ -692,6 +805,17 @@ mod tests {
     }
 
     #[test]
+    fn every_mode_has_motions_that_suit_it() {
+        for &mode in Mode::ALL {
+            assert!(IDLES.iter().any(|i| i.suits(mode)), "{mode:?}");
+            // Simulations start from where the art is at first.
+            if mode.simulates() || mode.flocks() {
+                assert!(!Idle::Arrive.suits(mode) && !Idle::Marquee.suits(mode));
+            }
+        }
+    }
+
+    #[test]
     fn art_fits_on_screen_for_every_subject_and_size() {
         for (cols, rows) in [(40, 12), (80, 24), (160, 48), (300, 90), (60, 70)] {
             for subject in [
@@ -699,6 +823,9 @@ mod tests {
                 Subject::Logo(Logo::Emblem),
                 Subject::Word(Word::Small),
                 Subject::Lockup(Logo::Mascot, Word::Pixel),
+                Subject::Phrase("cargo add ratatui", Word::Pixel),
+                Subject::Widget(Panel::Bars, 1),
+                Subject::Widget(Panel::Dashboard, 2),
             ] {
                 let stage = Stage::new(act(subject), cols, rows, 2.0);
                 for piece in &stage.pieces {

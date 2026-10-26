@@ -32,6 +32,20 @@ pub enum Backdrop {
     Mandelbulb,
     /// Flying through an endless Menger sponge.
     Menger,
+    /// Flying low over ray-marched hills.
+    Terrain,
+    /// Glowing blobs that merge and split.
+    Metaballs,
+    /// Stained glass: drifting Voronoi cells with bright leading.
+    Voronoi,
+    /// Domain-warped noise, like marbled paper.
+    Marble,
+    /// Circles packed in circles, zooming in.
+    Apollonian,
+    /// Lace of a Kleinian group's limit set, folded and inverted.
+    Kleinian,
+    /// The scene's own art, small and tiled, drifting.
+    Tiles,
     /// A fractal flame of millions of points.
     Flame,
     /// The Clifford attractor, drifting.
@@ -40,6 +54,8 @@ pub enum Backdrop {
     DeJong,
     /// The Lorenz butterfly, turning.
     Lorenz,
+    /// Particle Life: kinds of particles that chase and flee each other.
+    ParticleLife,
 }
 
 /// In the shader's order (`backdrop.wgsl`).
@@ -58,10 +74,18 @@ pub const BACKDROPS: &[Backdrop] = &[
     Backdrop::Warp,
     Backdrop::Mandelbulb,
     Backdrop::Menger,
+    Backdrop::Terrain,
+    Backdrop::Metaballs,
+    Backdrop::Voronoi,
+    Backdrop::Marble,
+    Backdrop::Apollonian,
+    Backdrop::Kleinian,
+    Backdrop::Tiles,
     Backdrop::Flame,
     Backdrop::Clifford,
     Backdrop::DeJong,
     Backdrop::Lorenz,
+    Backdrop::ParticleLife,
 ];
 
 impl Backdrop {
@@ -69,7 +93,11 @@ impl Backdrop {
     pub fn splatted(self) -> bool {
         matches!(
             self,
-            Backdrop::Flame | Backdrop::Clifford | Backdrop::DeJong | Backdrop::Lorenz
+            Backdrop::Flame
+                | Backdrop::Clifford
+                | Backdrop::DeJong
+                | Backdrop::Lorenz
+                | Backdrop::ParticleLife
         )
     }
 
@@ -89,10 +117,18 @@ impl Backdrop {
             Backdrop::Warp => "warp",
             Backdrop::Mandelbulb => "mandelbulb",
             Backdrop::Menger => "menger",
+            Backdrop::Terrain => "terrain",
+            Backdrop::Metaballs => "metaballs",
+            Backdrop::Voronoi => "stained glass",
+            Backdrop::Marble => "marbling",
+            Backdrop::Apollonian => "apollonian",
+            Backdrop::Kleinian => "kleinian",
+            Backdrop::Tiles => "tiles",
             Backdrop::Flame => "flame",
             Backdrop::Clifford => "clifford",
             Backdrop::DeJong => "de jong",
             Backdrop::Lorenz => "lorenz",
+            Backdrop::ParticleLife => "particle life",
         }
     }
 }

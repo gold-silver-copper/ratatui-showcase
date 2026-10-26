@@ -69,22 +69,127 @@ pub struct Theme {
     pub accent: Rgb,
 }
 
-impl Theme {
+/// A scene's colours: one of the themes, or a harmony generated for it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Palette {
+    pub name: String,
+    pub background: Rgb,
+    /// A looping gradient; the shaders sample it.
+    pub stops: Vec<Rgb>,
+    pub accent: Rgb,
+}
+
+impl Palette {
+    pub fn theme(theme: &Theme) -> Self {
+        Self {
+            name: theme.name.to_owned(),
+            background: theme.background,
+            stops: theme.stops.iter().map(|&h| Rgb::hex(h)).collect(),
+            accent: theme.accent,
+        }
+    }
+
+    /// The first theme, the show's opening colours.
+    pub fn first() -> Self {
+        THEMES.first().map_or_else(Self::generated, Self::theme)
+    }
+
+    /// One of the themes, or now and then a palette made up on the spot.
+    pub fn random() -> Self {
+        if fastrand::f32() < 0.45 {
+            return Self::generated();
+        }
+        let theme = THEMES
+            .get(fastrand::usize(..THEMES.len()))
+            .unwrap_or(&FALLBACK);
+        Self::theme(theme)
+    }
+
+    /// A colour harmony around a random hue, in OKLCH so its colours look
+    /// evenly bright: hues spread by one of the classic schemes, a dark
+    /// background tinted with the base hue, an accent opposite it.
+    pub fn generated() -> Self {
+        let hue = fastrand::f32() * 360.0;
+        let (scheme, offsets): (&str, [f32; 5]) = match fastrand::u8(0..6) {
+            0 => ("analogous", [-40.0, -20.0, 0.0, 20.0, 40.0]),
+            1 => ("complementary", [0.0, 20.0, 180.0, 200.0, -15.0]),
+            2 => ("triadic", [0.0, 120.0, 240.0, 30.0, 150.0]),
+            3 => ("split", [0.0, 150.0, 210.0, 15.0, 165.0]),
+            4 => ("tetradic", [0.0, 90.0, 180.0, 270.0, 45.0]),
+            _ => ("tonal", [0.0, 8.0, -8.0, 16.0, -16.0]),
+        };
+        let stops = offsets
+            .iter()
+            .enumerate()
+            .map(|(i, offset)| {
+                let light = if scheme == "tonal" {
+                    0.45 + 0.1 * num::float(i)
+                } else {
+                    0.62 + fastrand::f32() * 0.22
+                };
+                oklch(light, 0.09 + fastrand::f32() * 0.1, hue + offset)
+            })
+            .collect();
+        Self {
+            name: format!("{scheme} {}°", num::floor_u32(hue)),
+            background: oklch(0.14, 0.03, hue),
+            stops,
+            accent: oklch(0.9, 0.12, hue + 180.0),
+        }
+    }
+
     /// Samples the looping gradient at `t` (wraps every 1.0).
     pub fn sample(&self, t: f32) -> Rgb {
         let n = self.stops.len();
         let p = t.rem_euclid(1.0) * num::float(n);
         let i = num::floor_usize(p);
-        let a = self
-            .stops
-            .get(i.checked_rem(n).unwrap_or(0))
-            .map_or(Rgb::BLACK, |&h| Rgb::hex(h));
-        let b = self
-            .stops
-            .get(i.saturating_add(1).checked_rem(n).unwrap_or(0))
-            .map_or(Rgb::BLACK, |&h| Rgb::hex(h));
+        let at = |k: usize| {
+            self.stops
+                .get(k.checked_rem(n).unwrap_or(0))
+                .copied()
+                .unwrap_or(Rgb::BLACK)
+        };
         let f = p.fract();
-        a.lerp(b, f * f * (3.0 - 2.0 * f))
+        at(i).lerp(at(i.saturating_add(1)), f * f * (3.0 - 2.0 * f))
+    }
+}
+
+const FALLBACK: Theme = Theme {
+    name: "",
+    background: Rgb::BLACK,
+    stops: &[0xffffff],
+    accent: Rgb::WHITE,
+};
+
+/// A colour from OKLCH (lightness 0..1, chroma, hue in degrees), with its
+/// chroma lowered until it fits in sRGB.
+pub fn oklch(l: f32, c: f32, hue: f32) -> Rgb {
+    let (sin, cos) = hue.to_radians().sin_cos();
+    let mut chroma = c;
+    loop {
+        let (a, b) = (chroma * cos, chroma * sin);
+        let l_ = l + 0.396_337_78 * a + 0.215_803_76 * b;
+        let m_ = l - 0.105_561_346 * a - 0.063_854_17 * b;
+        let s_ = l - 0.089_484_18 * a - 1.291_485_5 * b;
+        let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+        let linear = [
+            4.076_741_7 * l3 - 3.307_711_6 * m3 + 0.230_969_94 * s3,
+            -1.268_438 * l3 + 2.609_757_4 * m3 - 0.341_319_38 * s3,
+            -0.004_196_086_3 * l3 - 0.703_418_6 * m3 + 1.707_614_7 * s3,
+        ];
+        if linear.iter().all(|v| (-0.001..=1.001).contains(v)) || chroma <= 0.0 {
+            let encode = |v: f32| {
+                let v = v.clamp(0.0, 1.0);
+                if v <= 0.003_130_8 {
+                    v * 12.92
+                } else {
+                    1.055 * v.powf(1.0 / 2.4) - 0.055
+                }
+            };
+            let [r, g, b] = linear.map(encode);
+            return Rgb(r, g, b);
+        }
+        chroma -= 0.01;
     }
 }
 
@@ -234,7 +339,25 @@ mod tests {
     #[test]
     fn gradient_loops_seamlessly() {
         let Some(theme) = THEMES.get(1) else { return };
-        let (a, b) = (theme.sample(0.0), theme.sample(0.999_99));
+        let palette = Palette::theme(theme);
+        let (a, b) = (palette.sample(0.0), palette.sample(0.999_99));
         assert!((a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01 && (a.2 - b.2).abs() < 0.01);
+    }
+
+    #[test]
+    fn generated_palettes_stay_in_gamut() {
+        for _ in 0..200 {
+            let p = Palette::generated();
+            for c in p.stops.iter().chain([&p.background, &p.accent]) {
+                assert!(
+                    [c.0, c.1, c.2].iter().all(|v| (0.0..=1.0).contains(v)),
+                    "{p:?}"
+                );
+            }
+            // Backgrounds dark, stops bright enough to read against them.
+            assert!(p.background.0.max(p.background.1).max(p.background.2) < 0.2);
+        }
+        let white = oklch(1.0, 0.0, 0.0);
+        assert!(white.0 > 0.99 && white.1 > 0.99 && white.2 > 0.99);
     }
 }

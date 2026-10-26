@@ -192,3 +192,82 @@ fn layout_bounds(font: &FontVec, text: &str, size: f32, screen_aspect: f32) -> O
         })
         .filter(|bounds| bounds.width() > 0.0 && bounds.height() > 0.0)
 }
+
+/// `text` as a ransom note: each letter from its own font in `faces`, at
+/// its own size and height, on a scrap of paper (`Material::Screen`) of its
+/// own, the whole fitting a `box_w` x `box_h` box.
+pub fn ransom(faces: &[Face], text: &str, box_w: usize, box_h: usize, aspect: f32) -> Bitmap {
+    let count = text.chars().count().max(1);
+    let slot = box_w.checked_div(count).unwrap_or(box_w);
+    let margin = box_h.div_ceil(24).max(1);
+    let letters: Vec<(Bitmap, usize)> = text
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            let jitter = crate::backdrop::hash(num::u32_of(i), 91);
+            let scale = 0.7 + 0.3 * jitter;
+            let cell = (
+                num::floor_usize(num::float(slot) * scale),
+                num::floor_usize(num::float(box_h) * scale * 0.8),
+            );
+            let glyph = match faces.get(i.checked_rem(faces.len()).unwrap_or(0)) {
+                Some(face) if c != ' ' => rasterize(
+                    &face.font,
+                    &c.to_string(),
+                    cell.0.saturating_sub(margin.saturating_mul(2)),
+                    cell.1,
+                    aspect,
+                ),
+                _ => Bitmap::new(slot.div_ceil(2), 1, aspect),
+            };
+            // The scrap: the letter's box and a margin, all paper.
+            let mut scrap = Bitmap::new(
+                glyph.width.saturating_add(margin.saturating_mul(2)),
+                glyph.height.saturating_add(margin.saturating_mul(2)),
+                aspect,
+            );
+            if c != ' ' {
+                for y in 0..scrap.height {
+                    for x in 0..scrap.width {
+                        let ink = glyph
+                            .get(x.wrapping_sub(margin), y.wrapping_sub(margin))
+                            .ink;
+                        let material = if ink > 0.5 {
+                            Material::Ink
+                        } else {
+                            Material::Screen
+                        };
+                        scrap.set(x, y, Px { ink: 1.0, material });
+                    }
+                }
+            }
+            let drop = num::floor_usize(
+                num::float(box_h) * 0.12 * crate::backdrop::hash(num::u32_of(i), 17),
+            );
+            (scrap, drop)
+        })
+        .collect();
+    let width = letters
+        .iter()
+        .map(|(b, _)| b.width.saturating_add(margin))
+        .sum();
+    let height = letters
+        .iter()
+        .map(|(b, drop)| b.height.saturating_add(*drop))
+        .max()
+        .unwrap_or(0);
+    let mut out = Bitmap::new(width, height, aspect);
+    let mut left = 0_usize;
+    for (scrap, drop) in &letters {
+        for y in 0..scrap.height {
+            for x in 0..scrap.width {
+                let px = scrap.get(x, y);
+                if px.ink > 0.0 {
+                    out.set(left.saturating_add(x), drop.saturating_add(y), px);
+                }
+            }
+        }
+        left = left.saturating_add(scrap.width).saturating_add(margin);
+    }
+    out
+}

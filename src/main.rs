@@ -3,6 +3,7 @@
 
 mod art;
 mod backdrop;
+mod director;
 mod fonts;
 mod fx;
 mod glyph_table;
@@ -15,6 +16,7 @@ mod shader;
 mod stage;
 mod theme;
 mod transition;
+mod widgets;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -33,13 +35,13 @@ use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::terminal::{self, BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use tachyonfx::EffectManager;
 
-use crate::art::{STYLES, Style};
+use crate::art::Style;
 use crate::backdrop::{BACKDROPS, Backdrop};
+use crate::director::Director;
 use crate::fonts::SystemFonts;
 use crate::glyphs::{GlyphSet, Glyphs};
-use crate::stage::Stage;
-use crate::stage::{Act, IDLES, Idle, LOOKS, Logo, Look, MODES, Mode, POSTS, Post, Subject, Word};
-use crate::theme::{SHADERS, Shader, THEMES};
+use crate::stage::{Act, IDLES, Idle, LOOKS, Logo, Look, MODES, Mode, POSTS, Post, Stage, Subject};
+use crate::theme::{Palette, SHADERS, Shader};
 use crate::transition::{Crossing, KINDS};
 
 const USAGE: &str = "\
@@ -193,6 +195,7 @@ struct Show {
     skip: bool,
     /// The next scene, laid out in the background while this one holds.
     next: Option<(u16, u16, Task<Stage>)>,
+    director: Director,
     /// When the shaders' clock started, in seconds since launch. It starts
     /// over now and then, at a scene change, so f32 keeps its precision.
     epoch: f64,
@@ -203,7 +206,7 @@ impl Show {
         Self {
             act: Act {
                 subject: Subject::Logo(Logo::Mascot),
-                theme: 0,
+                palette: Palette::first(),
                 shader: Shader::Sheen,
                 backdrop: Backdrop::Vignette,
                 look: Look::Smooth,
@@ -222,13 +225,14 @@ impl Show {
             caption: true,
             skip: false,
             next: None,
+            director: Director::default(),
             epoch: 0.0,
         }
     }
 
     /// Starts laying out the scene after `current` on another thread.
     fn prepare(&mut self, current: &Act, fonts: &SystemFonts, cols: u16, rows: u16) {
-        let act = Self::next_act(current, fonts);
+        let act = self.director.next(current, fonts);
         let ratio = cell_ratio();
         let task =
             AsyncComputeTaskPool::get().spawn(async move { Stage::new(act, cols, rows, ratio) });
@@ -239,7 +243,7 @@ impl Show {
     fn take_next(&mut self, current: &Act, fonts: &SystemFonts, cols: u16, rows: u16) -> Stage {
         match self.next.take() {
             Some((c, r, task)) if (c, r) == (cols, rows) => block_on(task),
-            _ => Stage::new(Self::next_act(current, fonts), cols, rows, cell_ratio()),
+            _ => Stage::new(self.director.next(current, fonts), cols, rows, cell_ratio()),
         }
     }
 
@@ -249,57 +253,6 @@ impl Show {
             self.epoch = now;
         }
     }
-
-    /// Alternates logo and wordmark, sometimes both together, each time in a
-    /// fresh combination of everything else.
-    fn next_act(current: &Act, fonts: &SystemFonts) -> Act {
-        let word = || match fastrand::u8(0..6) {
-            0 => Word::Small,
-            1 => Word::Tiny,
-            2 => Word::Pixel,
-            _ => fonts.pick(stage::WORDMARK).map_or(Word::Pixel, Word::Face),
-        };
-        let logo = || {
-            if fastrand::bool() {
-                Logo::Mascot
-            } else {
-                Logo::Emblem
-            }
-        };
-        let subject = match (&current.subject, fastrand::u8(0..4)) {
-            (Subject::Lockup(..), n) if n < 2 => Subject::Logo(logo()),
-            (Subject::Lockup(..), _) => Subject::Word(word()),
-            (_, 0) => Subject::Lockup(logo(), word()),
-            (Subject::Logo(_), _) => Subject::Word(word()),
-            (Subject::Word(_), _) => Subject::Logo(logo()),
-        };
-        let mode = pick(MODES, Some(current.mode)).unwrap_or(Mode::Flat);
-        Act {
-            subject,
-            theme: other(THEMES.len(), current.theme),
-            shader: pick(SHADERS, Some(current.shader)).unwrap_or(Shader::Flow),
-            backdrop: pick(BACKDROPS, None).unwrap_or(Backdrop::Vignette),
-            look: pick(LOOKS, None).unwrap_or(Look::Smooth),
-            style: pick(STYLES, None).unwrap_or(Style::Solid),
-            idle: if mode == Mode::Turntable {
-                Idle::Still
-            } else {
-                pick(IDLES, None).unwrap_or(Idle::Still)
-            },
-            mode,
-            post: pick(POSTS, None).unwrap_or(Post::Clean),
-            variant: fastrand::u32(..),
-        }
-    }
-}
-
-/// A random index below `n` other than `current`.
-fn other(n: usize, current: usize) -> usize {
-    current
-        .saturating_add(1)
-        .saturating_add(fastrand::usize(..n.saturating_sub(1).max(1)))
-        .checked_rem(n)
-        .unwrap_or(0)
 }
 
 /// A random item, avoiding `avoid` when possible.
@@ -341,15 +294,22 @@ fn input(
             show.skip = true;
         } else if let KeyCode::Char(c) = key.code {
             match c {
-                't' => act.theme = other(THEMES.len(), act.theme),
+                't' => act.palette = Palette::random(),
                 's' => act.shader = pick(SHADERS, Some(act.shader)).unwrap_or(act.shader),
                 'b' => act.backdrop = pick(BACKDROPS, Some(act.backdrop)).unwrap_or(act.backdrop),
                 'l' => act.look = pick(LOOKS, Some(act.look)).unwrap_or(act.look),
                 'p' => act.post = pick(POSTS, Some(act.post)).unwrap_or(act.post),
-                'w' => act.idle = pick(IDLES, Some(act.idle)).unwrap_or(act.idle),
+                'w' => {
+                    let suited: Vec<Idle> = IDLES
+                        .iter()
+                        .copied()
+                        .filter(|i| i.suits(act.mode))
+                        .collect();
+                    act.idle = pick(&suited, Some(act.idle)).unwrap_or(act.idle);
+                }
                 'm' => {
                     act.mode = pick(MODES, Some(act.mode)).unwrap_or(act.mode);
-                    if act.mode == Mode::Turntable {
+                    if !act.idle.suits(act.mode) {
                         act.idle = Idle::Still;
                     }
                     rebuild = true;
@@ -570,7 +530,14 @@ fn change(
         // Rarely needed: most clocks start over during a cell transition.
         show.rebase(now, 1800.0);
         let to = next;
-        let kind = pick(KINDS, None).unwrap_or(transition::Kind::Morph);
+        // Transitions that run a simulation need it to themselves.
+        let busy = from.act.mode.simulates() || to.act.mode.simulates();
+        let kinds: Vec<transition::Kind> = KINDS
+            .iter()
+            .copied()
+            .filter(|k| !busy || k.simulation().is_none())
+            .collect();
+        let kind = pick(&kinds, None).unwrap_or(transition::Kind::Morph);
         show.crossing = Some(Crossing::new(kind, from, &to));
         show.stage = Some(to);
         show.phase = Phase::Crossing;

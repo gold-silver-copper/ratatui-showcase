@@ -74,8 +74,11 @@ slots! {
         OrbitLen,
         FlameThreads,
         FlameSteps,
+        /// The README's characters, for the text look.
+        InText,
+        TextLen,
         /// Where each region of `state` starts (`Region`).
-        Regions: 18,
+        Regions: 19,
     }
 }
 
@@ -98,6 +101,8 @@ slots! {
         /// The old scene's simulation, frozen when a new one takes over.
         Snapshot,
         Particles,
+        /// Slime mold agents and crystal walkers.
+        Agents,
         BgOld,
         BgNew,
         Flame,
