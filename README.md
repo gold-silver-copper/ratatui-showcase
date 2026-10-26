@@ -40,10 +40,8 @@ cargo run --release -- --profile   # GPU time per phase in the caption
 - **Subjects:** the ratatui mascot, the pixel-art rat from `assets/logo.svg`,
   the `RatatuiLogo` block lettering, the classic 8x8 font, the word set in a
   random font installed on the system (picked by family, so every design gets
-  a turn), a ransom note with each letter from a different font, logo and
-  wordmark together, phrases such as `cargo add ratatui`, and real ratatui
-  widgets (a bar chart, a line chart, gauges and a sparkline) rendered and
-  drawn like any other art.
+  a turn), a ransom note with each letter from a different font, or logo and
+  wordmark together.
 - **Modes:** flat; a solid that turns in 3D above a reflective floor, with
   soft shadows, ambient occlusion and depth of field; dye in a swirling fluid;
   coral, mitosis, worms, mazes or spots grown by reaction-diffusion; the Game

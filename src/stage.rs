@@ -14,7 +14,6 @@ use crate::glyphs::{COLS, ROWS};
 use crate::num;
 use crate::params::{BLOCK, PIECE_LEN, S};
 use crate::theme::{Palette, SHADERS, Shader};
-use crate::widgets::{self, Panel};
 
 pub const WORDMARK: &str = "ratatui";
 
@@ -40,24 +39,7 @@ pub enum Subject {
     Word(Word),
     /// Logo and wordmark together.
     Lockup(Logo, Word),
-    /// A phrase about ratatui, in a font.
-    Phrase(&'static str, Word),
-    /// Real ratatui widgets, with data from a seed.
-    Widget(Panel, u64),
 }
-
-/// Phrases a scene can spell out instead of the wordmark.
-pub const PHRASES: &[&str] = &[
-    "terminal UIs in Rust",
-    "cargo add ratatui",
-    "ratatui.rs",
-    "cooking up TUIs",
-    "widgets  layouts  style",
-    "immediate mode",
-    "tachyonfx",
-    "bevy_ratatui",
-    "made with ratatui",
-];
 
 /// How the frame is turned into characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -428,8 +410,6 @@ impl Act {
             Subject::Logo(l) => logo(l).to_owned(),
             Subject::Word(w) => name(w),
             Subject::Lockup(l, w) => format!("{} + {}", logo(l), name(w)),
-            Subject::Phrase(text, w) => format!("\"{text}\" in {}", name(w)),
-            Subject::Widget(panel, _) => panel.name().to_owned(),
         }
     }
 }
@@ -533,18 +513,6 @@ impl Stage {
                     fonts::rasterize(&face.font, WORDMARK, bw, bh, aspect)
                 }
                 Kind::Word(Word::Ransom(faces)) => fonts::ransom(&faces, WORDMARK, bw, bh, aspect),
-                Kind::Phrase(text, Word::Face(face)) => {
-                    fonts::rasterize(&face.font, text, bw, bh, aspect)
-                }
-                Kind::Phrase(text, Word::Ransom(faces)) => {
-                    fonts::ransom(&faces, text, bw, bh, aspect)
-                }
-                Kind::Phrase(text, Word::Small | Word::Tiny | Word::Pixel) => {
-                    art::pixel_font(text).fit(bw, bh, aspect)
-                }
-                Kind::Widget(panel, seed) => {
-                    widgets::render(panel, seed, bw, bh).fit(bw, bh, aspect)
-                }
             };
             act.style.apply(bitmap)
         };
@@ -562,20 +530,6 @@ impl Stage {
             }
             Subject::Word(word) => {
                 vec![centered(make(Kind::Word(word.clone()), w * 0.88, h * 0.56))]
-            }
-            Subject::Phrase(text, word) => {
-                vec![centered(make(
-                    Kind::Phrase(text, word.clone()),
-                    w * 0.92,
-                    h * 0.42,
-                ))]
-            }
-            Subject::Widget(panel, seed) => {
-                vec![centered(make(
-                    Kind::Widget(*panel, *seed),
-                    w * 0.82,
-                    h * 0.84,
-                ))]
             }
             // Side by side on a wide screen, stacked on a tall one.
             Subject::Lockup(logo, word) if w > h * aspect * 1.3 => {
@@ -802,8 +756,6 @@ impl Stage {
 enum Kind {
     Logo(Logo),
     Word(Word),
-    Phrase(&'static str, Word),
-    Widget(Panel, u64),
 }
 
 #[cfg(test)]
@@ -844,9 +796,6 @@ mod tests {
                 Subject::Logo(Logo::Emblem),
                 Subject::Word(Word::Small),
                 Subject::Lockup(Logo::Mascot, Word::Pixel),
-                Subject::Phrase("cargo add ratatui", Word::Pixel),
-                Subject::Widget(Panel::Bars, 1),
-                Subject::Widget(Panel::Dashboard, 2),
             ] {
                 let stage = Stage::new(act(subject), cols, rows, 2.0);
                 for piece in &stage.pieces {

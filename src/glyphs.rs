@@ -160,16 +160,6 @@ impl Glyphs {
             .collect()
     }
 
-    /// The 4 x 8 shape of `c`, if it is one of the block glyphs or an ASCII
-    /// character.
-    pub fn shape(&self, c: char) -> Option<u32> {
-        self.table
-            .iter()
-            .chain(&self.ascii)
-            .find(|&&(_, g)| g == c)
-            .map(|&(mask, _)| mask)
-    }
-
     pub fn ascii_len(&self) -> u32 {
         num::u32_of(self.ascii.len())
     }
