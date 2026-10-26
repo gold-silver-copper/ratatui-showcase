@@ -357,6 +357,22 @@ fn gasket(s: u32, x: f32, y: f32, t: f32, kleinian: bool) -> vec3<f32> {
     return background(s) * 0.6 + shade * (edge * 0.95 + 0.12);
 }
 
+/// The scene's own art, small, in staggered rows drifting across.
+fn tiles(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
+    if params[s + S_PIECES] == 0u { return background(s); }
+    let p = piece(s, 0u);
+    let tile_w = width() / 5.0;
+    let scale = tile_w / max(p.w, 1.0);
+    let span_x = tile_w * 1.3;
+    let span_y = p.h * scale * 1.5;
+    var q = vec2(x * width() + t * 14.0, y * height() + t * 5.0);
+    let row = floor(q.y / span_y);
+    q.x += row * span_x * 0.5;
+    let local = vec2(wrap(q.x / span_x) * span_x, wrap(q.y / span_y) * span_y) / scale;
+    let ink = f32(texel(p, local) & 0xffu) / 255.0;
+    return background(s) * 0.8 + sample(s, row * 0.13 + floor(q.x / span_x) * 0.07 + t * 0.02) * ink * 0.3;
+}
+
 /// Background at `(x, y)` in 0..1, half-cell pixel `(px, py)`.
 fn backdrop(s: u32, x: f32, y: f32, px: u32, py: u32, t: f32) -> vec3<f32> {
     let aspect = pf(H_ASPECT);
@@ -410,6 +426,7 @@ fn backdrop(s: u32, x: f32, y: f32, px: u32, py: u32, t: f32) -> vec3<f32> {
         case B_MARBLE: { return marbling(s, x, y, t) * 0.7; }
         case B_APOLLONIAN: { return gasket(s, x, y, t, false) * 0.75; }
         case B_KLEINIAN: { return gasket(s, x, y, t, true) * 0.75; }
+        case B_TILES: { return tiles(s, x, y, t); }
         // Flames and attractors are drawn over this from their histogram.
         case B_FLAME, B_CLIFFORD, B_DE_JONG, B_LORENZ, B_PARTICLE_LIFE: { return background(s) * 0.7 + vec3(dither); }
         default: { return base; }

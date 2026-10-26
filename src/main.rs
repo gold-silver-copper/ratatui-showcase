@@ -16,6 +16,7 @@ mod shader;
 mod stage;
 mod theme;
 mod transition;
+mod widgets;
 
 use std::io::Write;
 use std::process::ExitCode;

@@ -27,10 +27,25 @@ fn local(s: u32, p: Piece, x: f32, y: f32, t: f32) -> vec2<f32> {
                 l.y += amplitude * 3.0 * abs(sin(t * 2.6 - letter(p, l.x) * 0.55));
             }
         }
+        case I_ARRIVE: {
+            if l.x >= 0.0 && l.x < p.w { l.y += arrival(s, letter(p, l.x)); }
+        }
+        case I_MARQUEE: { l.x = wrap((l.x + marquee(s)) / ticker(p)) * ticker(p); }
         default: {}
     }
     return l;
 }
+
+/// How far above its place a letter still is as it drops in: one after
+/// another, bouncing as they land.
+fn arrival(s: u32, letter: f32) -> f32 {
+    let q = clamp((age(s) - 0.3 - letter * 0.14) / 0.9, 0.0, 1.0);
+    return height() * (1.0 - ease_out_bounce(q));
+}
+
+/// How far the ticker has scrolled, and how long it is before it repeats.
+fn marquee(s: u32) -> f32 { return age(s) * width() * 0.09; }
+fn ticker(p: Piece) -> f32 { return max(width(), p.w) + width() * 0.2; }
 
 /// Where the art's point `(x, y)` at rest is now: `local` the other way, so
 /// particles leave from and land on the art as it moves.
@@ -48,6 +63,11 @@ fn placed(s: u32, x: f32, y: f32) -> vec2<f32> {
             case I_BREATHE: { l = c + (l - c) * (1.0 + 0.035 * sin(t * 1.2)); }
             case I_SWAY: { l = c + rot(0.04 * sin(t * 0.7)) * (l - c); }
             case I_BOUNCE: { l.y -= amplitude * 3.0 * abs(sin(t * 2.6 - letter(p, l.x) * 0.55)); }
+            case I_ARRIVE: { l.y -= arrival(s, letter(p, l.x)); }
+            case I_MARQUEE: {
+                let x = wrap((p.x + l.x - marquee(s)) / ticker(p)) * ticker(p);
+                return vec2(x, p.y + l.y);
+            }
             default: {}
         }
         return vec2(p.x, p.y) + l;

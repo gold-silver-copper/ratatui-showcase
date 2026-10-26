@@ -44,6 +44,8 @@ pub enum Backdrop {
     Apollonian,
     /// Lace of a Kleinian group's limit set, folded and inverted.
     Kleinian,
+    /// The scene's own art, small and tiled, drifting.
+    Tiles,
     /// A fractal flame of millions of points.
     Flame,
     /// The Clifford attractor, drifting.
@@ -78,6 +80,7 @@ pub const BACKDROPS: &[Backdrop] = &[
     Backdrop::Marble,
     Backdrop::Apollonian,
     Backdrop::Kleinian,
+    Backdrop::Tiles,
     Backdrop::Flame,
     Backdrop::Clifford,
     Backdrop::DeJong,
@@ -120,6 +123,7 @@ impl Backdrop {
             Backdrop::Marble => "marbling",
             Backdrop::Apollonian => "apollonian",
             Backdrop::Kleinian => "kleinian",
+            Backdrop::Tiles => "tiles",
             Backdrop::Flame => "flame",
             Backdrop::Clifford => "clifford",
             Backdrop::DeJong => "de jong",
