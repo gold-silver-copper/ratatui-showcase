@@ -1,6 +1,6 @@
 //! Picking the block glyph whose shape best matches a cell's coverage.
 //!
-//! The shader does the matching (`render.wgsl`); this builds the table.
+//! The shader does the matching (`encode.wgsl`); this builds the table.
 //! A cell is sampled on a 4x8 grid; bit `row * 4 + col` is set where the art
 //! covers that sample. Each candidate glyph gets the same kind of mask, and
 //! the nearest one by Hamming distance wins. Edges then land on sub-cell

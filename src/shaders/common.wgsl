@@ -1,5 +1,6 @@
-// Shared by every pass: bindings, the layout of `params` (see gpu.rs, which
-// must match), and small helpers.
+// Shared by every pass: bindings, small helpers, and how passes keep state
+// between frames. The params layout and every option's number (H_*, S_*,
+// B_*, K_* and so on) are generated from the Rust side (shader.rs).
 //
 // Positions are in samples: each terminal cell is 4 x 8 of them. Images in
 // `state` are one vec4 per sample; simulations, distance fields and
@@ -14,117 +15,34 @@
 @group(0) @binding(5) var<storage, read_write> color: array<atomic<u32>>;
 // Flames and attractors: hits and summed colour index per sample.
 @group(0) @binding(6) var<storage, read_write> hist: array<atomic<u32>>;
+// The final image of this frame and of the last, packed to 8 bits a channel.
+@group(0) @binding(7) var<storage, read_write> frames: array<u32>;
 
-// Pipeline constants: jump size for distance fields, and which of two
-// buffers a ping-pong pass reads.
+// Pipeline constants: jump size for distance fields or bloom level, and
+// which of two buffers a ping-pong pass reads.
 override STEP: u32 = 1u;
 override FLIP: u32 = 0u;
 
-// Header.
-const H_COLS: u32 = 0u;
-const H_ROWS: u32 = 1u;
-const H_TIME: u32 = 2u;
-const H_ASPECT: u32 = 3u;
-const H_LOOK: u32 = 4u;
-const H_GLYPHS: u32 = 5u;
-const H_KIND: u32 = 6u;
-const H_PROGRESS: u32 = 7u;
-const H_GRAIN: u32 = 8u;
-const H_SOURCES: u32 = 9u;
-const H_TARGETS: u32 = 10u;
-const H_FRAME: u32 = 11u;
-const H_DT: u32 = 12u;
-const H_POST: u32 = 13u;
-const H_DITHER: u32 = 14u;
-const H_SWARM: u32 = 15u;
-const H_SCENE: u32 = 16u;
-const H_FINAL: u32 = 17u;
-const H_PREVIOUS: u32 = 18u;
-const H_BLOOM0: u32 = 19u;
-const H_BLOOM1: u32 = 20u;
-const H_FIELD0: u32 = 21u;
-const H_FIELD1: u32 = 22u;
-const H_SIM0: u32 = 23u;
-const H_SIM1: u32 = 24u;
-const H_SIM2: u32 = 25u;
-const H_SIM3: u32 = 26u;
-const H_PARTICLES: u32 = 27u;
-const H_BG_OLD: u32 = 28u;
-const H_BG_NEW: u32 = 29u;
-const H_BLOOM2: u32 = 30u;
-const H_BLOOM3: u32 = 31u;
-const H_BLOOM4: u32 = 32u;
-const H_BLOOM5: u32 = 33u;
-const H_IN_GLYPHS: u32 = 34u;
-const H_IN_ASCII: u32 = 35u;
-const H_ASCII_COUNT: u32 = 36u;
-const H_IN_POINTS: u32 = 37u;
-const H_IN_HOMES: u32 = 38u;
-const H_HOMES: u32 = 39u;
-const H_IN_ART: u32 = 40u;
-const H_IN_ORBIT: u32 = 41u;
-const H_SIM_LATEST: u32 = 42u;
-const H_SIM_RESET: u32 = 43u;
-const H_ORBIT_LEN: u32 = 44u;
-const H_FLAME: u32 = 45u;
-const H_FLAME_THREADS: u32 = 46u;
-const H_FLAME_STEPS: u32 = 47u;
-const H_FROM: u32 = 64u;
-const H_TO: u32 = 128u;
+/// Which thread this is: big passes spread their workgroups over two axes.
+fn thread(id: vec3<u32>, groups: vec3<u32>) -> u32 { return id.x + id.y * groups.x * 64u; }
 
-// A scene's block, from its base.
-const S_SHADER: u32 = 0u;
-const S_BACKDROP: u32 = 1u;
-const S_IDLE: u32 = 2u;
-const S_AMPLITUDE: u32 = 3u;
-const S_PIECES: u32 = 4u;
-const S_STOPS: u32 = 5u;
-const S_MODE: u32 = 6u;
-const S_STYLE: u32 = 7u;
-const S_BACKGROUND: u32 = 8u;
-const S_ACCENT: u32 = 11u;
-const S_STOP0: u32 = 14u;
-const S_AGE: u32 = 29u;
-const S_WIDTH: u32 = 30u;
-const S_GLOW: u32 = 31u;
-const S_PIECE0: u32 = 32u;
-const S_VARIANT: u32 = 48u;
-const PIECE_LEN: u32 = 8u;
+// Marks: words after the cells in `output` that the GPU keeps for itself
+// between frames, updated by the last pass (`finish`). They decide what
+// must stay in step with the GPU's own state, so a frame that never ran
+// can't put it out of step.
+/// The scene the simulation buffers belong to.
+const MARK_SIM: u32 = 0u;
+/// Simulation steps so far: which ping-pong buffer is current.
+const MARK_PARITY: u32 = 1u;
+/// Frames drawn so far: which final image is this frame's.
+const MARK_FRAME: u32 = 2u;
+/// The splatted backdrop the flame points belong to.
+const MARK_SPLAT: u32 = 3u;
+/// The scene the distance fields were built for, if they can be kept.
+const MARK_FIELD: u32 = 4u;
 
-// Modes: how a scene draws its art.
-const M_FLAT: u32 = 0u;
-const M_TURNTABLE: u32 = 1u;
-const M_FLUID: u32 = 2u;
-const M_REACTION: u32 = 3u;
-const M_LIFE: u32 = 4u;
-const M_FIRE: u32 = 5u;
-const M_RIPPLE: u32 = 6u;
-const M_SWARM: u32 = 7u;
-
-// Styles.
-const ST_SOLID: u32 = 0u;
-const ST_OUTLINE: u32 = 1u;
-const ST_NEON: u32 = 2u;
-const ST_BEVEL: u32 = 3u;
-const ST_SHADOW: u32 = 4u;
-
-// Transitions.
-const K_STILL: u32 = 0u;
-const K_BURN: u32 = 8u;
-const K_ZOOM: u32 = 9u;
-const K_SWIRL: u32 = 10u;
-const K_RIPPLE: u32 = 11u;
-const K_MOSAIC: u32 = 12u;
-const K_SLICES: u32 = 13u;
-const K_GLITCH: u32 = 14u;
-const K_CRT: u32 = 15u;
-const K_MORPH: u32 = 16u;
-const K_SWARM: u32 = 17u;
-const K_SCATTER: u32 = 18u;
-const K_POUR: u32 = 19u;
-const K_VORTEX: u32 = 20u;
-const K_CRUMBLE: u32 = 21u;
-const K_MELT: u32 = 22u;
+fn marks() -> u32 { return 2u + params[H_COLS] * params[H_ROWS] * 3u; }
+fn mark(k: u32) -> u32 { return output[marks() + k]; }
 
 const COLS: u32 = 4u;
 const ROWS: u32 = 8u;
@@ -223,7 +141,7 @@ fn ease_in_out(t: f32) -> f32 {
     let c = clamp(t, 0.0, 1.0);
     return select(1.0 - pow(-2.0 * c + 2.0, 3.0) / 2.0, 4.0 * c * c * c, c < 0.5);
 }
-fn ease_out_back(t: f32) -> f32 { return 1.0 + 2.70158 * pow(t - 1.0, 3.0) + 1.70158 * pow(t - 1.0, 2.0); }
+fn ease_out_back(t: f32) -> f32 { let u = t - 1.0; return 1.0 + 2.70158 * u * u * u + 1.70158 * u * u; }
 fn ease_out_bounce(t: f32) -> f32 {
     let n = 7.5625;
     let d = 2.75;
@@ -263,6 +181,16 @@ fn grid_sample(base: u32, p: vec2<f32>) -> vec4<f32> {
     let d = grid_load(base, i.x + 1, i.y + 1);
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
+
+/// Sample `p` of this frame's final image (`which` 0) or the last one's (1).
+fn final_index(which: u32, p: vec2<f32>) -> u32 {
+    let x = u32(clamp(p.x, 0.0, width() - 1.0));
+    let y = u32(clamp(p.y, 0.0, height() - 1.0));
+    let slot = (mark(MARK_FRAME) + which) & 1u;
+    return slot * img_w() * img_h() + img_index(x, y);
+}
+
+fn final_load(which: u32, p: vec2<f32>) -> vec3<f32> { return unpack4x8unorm(frames[final_index(which, p)]).rgb; }
 
 fn bloom_load(base: u32, level: u32, x: i32, y: i32) -> vec4<f32> {
     let bx = u32(clamp(x, 0, i32(bloom_w(level)) - 1));

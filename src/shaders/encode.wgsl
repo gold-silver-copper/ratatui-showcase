@@ -1,14 +1,8 @@
 // The encode pass: each terminal cell's 32 samples of the final image become
 // one character and two colours. The samples are split into two groups of
-// colour (2-means); the split's shape picks the glyph.
-
-const L_SMOOTH: u32 = 0u;
-const L_PIXELS: u32 = 1u;
-const L_BRAILLE: u32 = 2u;
-const L_ASCII: u32 = 3u;
-const L_LED: u32 = 4u;
-const L_SHAPES: u32 = 5u;
-const L_CODE: u32 = 6u;
+// colour (2-means); the split's shape picks the glyph. Every byte written
+// to the terminal costs time, so a cell that barely changed keeps what it
+// had, and a cell of one colour is a space with only a background.
 
 /// The table entry (mask, code point) nearest `mask`, from `count` entries
 /// at header slot `base`.
@@ -40,10 +34,10 @@ const RAIN: array<u32, 24> = array<u32, 24>(0xff71u, 0xff72u, 0xff73u, 0xff74u, 
     0xff7au, 0xff7bu, 0xff7cu, 0xff7du, 0xff7eu, 0xff7fu, 0xff80u, 0xff81u, 0xff82u, 0x30u, 0x31u, 0x5au, 0x3au, 0x2bu, 0x2au);
 
 @compute @workgroup_size(64)
-fn encode(@builtin(global_invocation_id) id: vec3<u32>) {
+fn encode(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
     let cols = params[H_COLS];
     let rows = params[H_ROWS];
-    let cell = id.x;
+    let cell = thread(id, groups);
     if cell == 0u { output[0] = cols; output[1] = rows; }
     if cell >= cols * rows { return; }
     let cx = cell % cols;
@@ -54,7 +48,7 @@ fn encode(@builtin(global_invocation_id) id: vec3<u32>) {
     var top = vec3(0.0);
     var bottom = vec3(0.0);
     for (var i = 0u; i < SAMPLES; i++) {
-        let v = state[params[H_FINAL] + img_index(cx * COLS + i % COLS, cy * ROWS + i / COLS)].rgb;
+        let v = unpack4x8unorm(frames[final_index(0u, vec2(f32(cx * COLS + i % COLS), f32(cy * ROWS + i / COLS)))]).rgb;
         c[i] = v;
         mean += v * v;
         if i < 16u { top += v * v; } else { bottom += v * v; }
@@ -101,31 +95,34 @@ fn encode(@builtin(global_invocation_id) id: vec3<u32>) {
     var bg = pixels_bottom;
     let look = params[H_LOOK];
     switch look {
-        case 0u, 5u: {
+        case L_SMOOTH, L_SHAPES: {
+            var best = vec2(0u, 0x20u);
             if !plain {
                 let table = select(H_IN_GLYPHS, H_IN_ASCII, look == L_SHAPES);
                 let count = select(params[H_GLYPHS], params[H_ASCII_COUNT], look == L_SHAPES);
-                let best = nearest(table, count, mask);
-                if best.x != 0u && best.x != 0xffffffffu {
-                    glyph = best.y;
-                    // Each side of the glyph: the average of the samples it covers.
-                    var on = vec3(0.0);
-                    var off = vec3(0.0);
-                    var a = 0.0;
-                    var b = 0.0;
-                    for (var i = 0u; i < SAMPLES; i++) {
-                        if ((best.x >> i) & 1u) == 1u { on += c[i] * c[i]; a += 1.0; } else { off += c[i] * c[i]; b += 1.0; }
-                    }
-                    fg = average(on, a);
-                    bg = average(off, b);
+                best = nearest(table, count, mask);
+            }
+            let shaped = best.x != 0u && best.x != 0xffffffffu;
+            if shaped {
+                glyph = best.y;
+                // Each side of the glyph: the average of the samples it covers.
+                var on = vec3(0.0);
+                var off = vec3(0.0);
+                var a = 0.0;
+                var b = 0.0;
+                for (var i = 0u; i < SAMPLES; i++) {
+                    if ((best.x >> i) & 1u) == 1u { on += c[i] * c[i]; a += 1.0; } else { off += c[i] * c[i]; b += 1.0; }
                 }
+                fg = average(on, a);
+                bg = average(off, b);
             } else if look == L_SHAPES {
+                // ASCII has no half blocks: what no character fits is a space.
                 glyph = 0x20u;
                 bg = sqrt(lin_mean);
             }
         }
-        case 1u: {}
-        case 2u: {
+        case L_PIXELS: {}
+        case L_BRAILLE: {
             var bits = 0u;
             for (var k = 0u; k < 8u; k++) {
                 let dc = k % 2u;
@@ -138,14 +135,14 @@ fn encode(@builtin(global_invocation_id) id: vec3<u32>) {
             fg = lerp(fg_group, WHITE, 0.08);
             bg = select(bg_group, sqrt(lin_mean), bits == 0u);
         }
-        case 3u: {
+        case L_ASCII: {
             let ramp = array<u32, 10>(0x20u, 0x2eu, 0x3au, 0x2du, 0x3du, 0x2bu, 0x2au, 0x23u, 0x25u, 0x40u);
             let coverage = select(n_on / 32.0, clamp(luma(sqrt(lin_mean)) * 1.4, 0.0, 1.0), plain);
             glyph = ramp[min(u32(round(coverage * 9.0)), 9u)];
             fg = select(fg_group, sqrt(lin_mean) * 1.3, plain);
             bg = select(bg_group, sqrt(lin_mean) * 0.25, plain);
         }
-        case 4u: {
+        case L_LED: {
             let lum = luma(sqrt(lin_mean));
             bg = select(bg_group, sqrt(lin_mean), plain) * 0.6;
             if (!plain && n_on >= 10.0 && luma(fg_group) > 0.2) || lum > 0.35 {
@@ -171,7 +168,39 @@ fn encode(@builtin(global_invocation_id) id: vec3<u32>) {
             bg = select(bg_group, sqrt(lin_mean), plain) * 0.22;
         }
     }
-    output[2u + cell * 3u] = glyph;
-    output[3u + cell * 3u] = pack(fg, cell, 0u);
-    output[4u + cell * 3u] = pack(bg, cell, 1u);
+    var front = pack(fg, cell, 0u);
+    let back = pack(bg, cell, 1u);
+    // Half blocks whose halves match are a space, and a space's foreground
+    // is never seen: one colour, so neighbours share it and it isn't resent.
+    if glyph == 0x2580u && front == back { glyph = 0x20u; }
+    if glyph == 0x20u { front = 0u; }
+    let o = 2u + cell * 3u;
+    if params[H_DITHER] == 0u && output[o] == glyph && near(output[o + 1u], front) && near(output[o + 2u], back) {
+        return;
+    }
+    output[o] = glyph;
+    output[o + 1u] = front;
+    output[o + 2u] = back;
+}
+
+/// Whether two packed colours differ by at most one step in each channel.
+fn near(a: u32, b: u32) -> bool {
+    let d = abs(vec3<i32>(unpack4x8unorm(a).xyz * 255.0) - vec3<i32>(unpack4x8unorm(b).xyz * 255.0));
+    return all(d <= vec3(2));
+}
+
+/// The frame's last pass: records what this frame did for the next (see
+/// the marks in common.wgsl).
+@compute @workgroup_size(64)
+fn finish(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    if thread(id, groups) != 0u { return; }
+    let m = marks();
+    let steps = params[H_SIM_STEPS];
+    if steps > 0u {
+        output[m + MARK_SIM] = params[H_SIM_ID];
+        output[m + MARK_PARITY] += steps;
+    }
+    output[m + MARK_FRAME] += 1u;
+    output[m + MARK_SPLAT] = params[H_SPLAT_ID];
+    output[m + MARK_FIELD] = params[H_FIELD_KEY];
 }

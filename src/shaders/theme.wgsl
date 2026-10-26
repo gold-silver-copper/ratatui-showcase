@@ -30,23 +30,23 @@ fn sparkle(u: f32, v: f32, t: f32, density: f32) -> f32 {
 fn shade_ink(s: u32, u: f32, v: f32, t: f32, row: u32) -> vec3<f32> {
     let d = length(vec2(u, v) - 0.5);
     switch params[s + S_SHADER] {
-        case 0u: { return sample(s, 0.6 * u + 0.4 * v - 0.08 * t); }
-        case 1u: {
+        case SH_FLOW: { return sample(s, 0.6 * u + 0.4 * v - 0.08 * t); }
+        case SH_PLASMA: {
             let w = sin(u * 7.0 + t * 0.9) + sin(v * 9.0 - t * 1.1) + sin((u + v) * 5.0 + t * 0.6)
                 + sin(d * 12.0 - t * 1.4);
             return sample(s, w * 0.125 + 0.5 + t * 0.02);
         }
-        case 2u: { return sample(s, d * 1.6 - t * 0.15); }
-        case 3u: { return lerp(sample(s, u * 0.5 + t * 0.03), WHITE, sweep(u + v * 0.6, t) * 0.8); }
-        case 4u: { return hsl(u * 0.9 + v * 0.3 - t * 0.1, 0.85, 0.62); }
-        case 5u: {
+        case SH_PULSE: { return sample(s, d * 1.6 - t * 0.15); }
+        case SH_SHEEN: { return lerp(sample(s, u * 0.5 + t * 0.03), WHITE, sweep(u + v * 0.6, t) * 0.8); }
+        case SH_RAINBOW: { return hsl(u * 0.9 + v * 0.3 - t * 0.1, 0.85, 0.62); }
+        case SH_SCANLINE: {
             let line = select(0.72, 1.0, row % 2u == 0u);
             let roll_at = t * 0.25 - floor(t * 0.25 / 1.4) * 1.4;
             let roll = exp(-pow((v - roll_at + 0.2) * 9.0, 2.0));
             let flicker = 0.97 + 0.03 * sin(t * 13.0 * TAU);
             return lerp(sample(s, v * 0.8 + t * 0.05) * line * flicker, WHITE, roll * 0.35);
         }
-        case 6u: {
+        case SH_CHROME: {
             let horizon = 0.55 + 0.03 * sin(u * 6.0 + t * 0.7);
             var chrome: vec3<f32>;
             if v < horizon {
@@ -57,31 +57,31 @@ fn shade_ink(s: u32, u: f32, v: f32, t: f32, row: u32) -> vec3<f32> {
             }
             return lerp(chrome, WHITE, sweep(u + v * 0.3, t) * 0.9);
         }
-        case 7u: {
+        case SH_HOLO: {
             let angle = atan2(v - 0.5, u - 0.5) / TAU;
             let foil = hsl(angle * 2.0 + d * 1.5 - t * 0.12, 0.7, 0.72);
             return lerp(mixl(foil, sample(s, u + t * 0.05), 0.35), WHITE, sparkle(u, v, t, 40.0) * 0.9);
         }
-        case 8u: {
+        case SH_FIRE: {
             let flicker = sin(u * 23.0 + t * 7.0) * 0.5 + sin(u * 41.0 - t * 11.0) * 0.25;
             let heat = clamp(1.15 - v + flicker * 0.12 + sin(t * 3.0 + u * 9.0) * 0.05, 0.0, 1.0);
             let flame = mixl(mixl(mixl(hex(0x400000u), hex(0xff3000u), heat * 1.6), hex(0xffd23fu), (heat - 0.5) * 2.0),
                 WHITE, (heat - 0.85) * 4.0);
             return mixl(flame, sample(s, heat * 0.5), 0.25);
         }
-        case 9u: {
+        case SH_STRIPES: {
             let w = wrap((u * 2.0 + v * 1.2) * 4.0 - t * 0.6);
             let band = floor(w * 2.0) / 2.0;
             return lerp(sample(s, band * 0.5 + t * 0.03), WHITE, select(0.0, 0.4, w < 0.06));
         }
-        case 10u: {
+        case SH_MARBLE: {
             // Marble: veins warped by noise.
             let q = vec2(u * 3.0, v * 1.5);
             let warp = fbm(q + vec2(t * 0.05, 0.0)) * 4.0;
             let vein = abs(sin((u * 4.0 + v * 2.0 + warp) * PI));
             return mixl(sample(s, warp * 0.2 + t * 0.02), WHITE * 0.95, pow(1.0 - vein, 6.0) * 0.8);
         }
-        case 11u: {
+        case SH_LAVA: {
             // Lava: domain-warped flow, glowing cracks.
             let q = vec2(u * 2.5, v * 1.2);
             let a = fbm(q + vec2(0.0, t * 0.12));
@@ -89,7 +89,7 @@ fn shade_ink(s: u32, u: f32, v: f32, t: f32, row: u32) -> vec3<f32> {
             let hot = smoothstep(0.35, 0.75, b);
             return mixl(background(s) * 2.0 + vec3(0.12, 0.02, 0.0), mixl(hex(0xff5a00u), sample(s, b + t * 0.03), 0.4) * (0.6 + hot), hot);
         }
-        case 12u: {
+        case SH_GOLD: {
             // Gold leaf: metallic gradient with moving highlights.
             let base = mixl(hex(0x6b4400u), hex(0xffd66bu), 0.5 + 0.5 * sin(v * 9.0 + u * 2.0 - t * 1.5));
             return lerp(mixl(base, sample(s, 0.2), 0.15), WHITE, sweep(u * 1.2 + v * 0.4, t * 1.3) * 0.9);

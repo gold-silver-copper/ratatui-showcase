@@ -1,5 +1,6 @@
 //! Full-screen transitions from one scene to the next. The GPU draws them
-//! (`render.wgsl`); this side keeps time and finds the particles: masked wipes,
+//! (`transitions.wgsl`, `particles.wgsl`); this side keeps time and finds the
+//! particles: masked wipes,
 //! warps of the whole frame, and particles that carry the old art's pixels to
 //! the new art's.
 
@@ -55,6 +56,33 @@ pub enum Kind {
     Melt,
 }
 
+/// Every kind once, in the shader's order (`K_*`).
+pub const ALL: &[Kind] = &[
+    Kind::Wipe(Shape::Radial),
+    Kind::Wipe(Shape::Diamond),
+    Kind::Wipe(Shape::Clock),
+    Kind::Wipe(Shape::Spiral),
+    Kind::Wipe(Shape::Diagonal),
+    Kind::Wipe(Shape::Blinds),
+    Kind::Wipe(Shape::Checker),
+    Kind::Burn,
+    Kind::Zoom,
+    Kind::Swirl,
+    Kind::Ripple,
+    Kind::Mosaic,
+    Kind::Slices,
+    Kind::Glitch,
+    Kind::Crt,
+    Kind::Morph,
+    Kind::Swarm,
+    Kind::Scatter,
+    Kind::Pour,
+    Kind::Vortex,
+    Kind::Crumble,
+    Kind::Melt,
+];
+
+/// The kinds to pick from; melts come up twice as often.
 pub const KINDS: &[Kind] = &[
     Kind::Wipe(Shape::Radial),
     Kind::Wipe(Shape::Diamond),
@@ -123,7 +151,7 @@ impl Kind {
 
     /// The kind's number in the shader: 0 is a scene at rest.
     pub fn code(self) -> u32 {
-        let index = KINDS.iter().position(|&k| k == self).unwrap_or(0);
+        let index = ALL.iter().position(|&k| k == self).unwrap_or(0);
         num::u32_of(index.saturating_add(1))
     }
 
@@ -163,10 +191,11 @@ impl Crossing {
             loop {
                 sources = points(&from, grain);
                 targets = points(to, grain);
-                if sources.len().max(targets.len()) <= MAX_PARTICLES {
+                let found = sources.len().max(targets.len());
+                if found <= MAX_PARTICLES {
                     break;
                 }
-                grain += 1.0;
+                grain = coarser(grain, found, MAX_PARTICLES);
             }
             // Morphs pair pixels in reading order, so shapes flow sideways
             // into each other; everything else pairs at random.
@@ -205,17 +234,19 @@ impl Crossing {
         )
     }
 
-    /// The particles for the GPU, sources then targets, as `x, y, seed`; and
-    /// how many threads move them.
-    pub fn particles(&self) -> (Vec<u32>, u32) {
-        let data = self
-            .sources
+    /// The particles for the GPU, sources then targets, as `x, y, seed`.
+    pub fn particles(&self) -> Vec<u32> {
+        self.sources
             .iter()
             .chain(&self.targets)
             .flat_map(|p| [p.x, p.y, p.seed].map(f32::to_bits))
-            .collect();
+            .collect()
+    }
+
+    /// How many threads move the particles.
+    pub fn threads(&self) -> u32 {
         let (sources, targets) = self.counts();
-        let threads = match self.kind {
+        match self.kind {
             Kind::Morph | Kind::Swarm => sources.max(targets),
             Kind::Wipe(_)
             | Kind::Burn
@@ -231,9 +262,15 @@ impl Crossing {
             | Kind::Vortex
             | Kind::Crumble
             | Kind::Melt => sources.saturating_add(targets),
-        };
-        (data, threads)
+        }
     }
+}
+
+/// A grain that should leave about `max` of the `found` points a finer one
+/// left: points thin out with the square of the grain.
+fn coarser(grain: f32, found: usize, max: usize) -> f32 {
+    let ratio = num::float(found) / num::float(max.max(1));
+    (grain * ratio.sqrt()).ceil().max(grain + 1.0)
 }
 
 /// Places in `stage`'s art for up to `max` swarm particles to settle, as
@@ -248,11 +285,12 @@ pub fn homes(stage: &Stage, max: usize) -> Vec<u32> {
                 .flat_map(|p| [p.x, p.y, p.seed].map(f32::to_bits))
                 .collect();
         }
-        grain += 1.0;
+        grain = coarser(grain, found.len(), max);
     }
 }
 
-/// The art's pixels, `grain` samples apart.
+/// The art's pixels at rest, `grain` samples apart; the GPU moves them with
+/// the art.
 fn points(stage: &Stage, grain: f32) -> Vec<Point> {
     let (left, top, right, bottom) = stage.bounds();
     let width = num::float(usize::from(stage.cols).saturating_mul(COLS));
@@ -262,7 +300,7 @@ fn points(stage: &Stage, grain: f32) -> Vec<Point> {
     while y < bottom.min(height) {
         let mut x = left.max(0.0);
         while x < right.min(width) {
-            if stage.coverage(x + grain / 2.0, y + grain / 2.0, 0.0) > 0.5 {
+            if stage.coverage(x + grain / 2.0, y + grain / 2.0) > 0.5 {
                 let seed = hash(num::floor_u32(x), num::floor_u32(y).wrapping_add(17));
                 points.push(Point {
                     x: x + grain / 2.0,

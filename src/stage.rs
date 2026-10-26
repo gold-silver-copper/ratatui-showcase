@@ -2,7 +2,6 @@
 //!
 //! Positions are in sub-cell samples: each cell is `COLS` x `ROWS` of them.
 
-use std::f32::consts::TAU;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -13,6 +12,7 @@ use crate::backdrop::{BACKDROPS, Backdrop};
 use crate::fonts::{self, Face};
 use crate::glyphs::{COLS, ROWS};
 use crate::num;
+use crate::params::{BLOCK, PIECE_LEN, S};
 use crate::theme::{Rgb, SHADERS, Shader, THEMES, Theme};
 
 pub const WORDMARK: &str = "ratatui";
@@ -73,17 +73,19 @@ pub const LOOKS: &[Look] = &[
 ];
 
 impl Look {
-    /// The look's number in the shader.
+    /// Every look once, in the shader's order (`L_*`).
+    pub const ALL: &[Look] = &[
+        Look::Smooth,
+        Look::Pixels,
+        Look::Braille,
+        Look::Ascii,
+        Look::Led,
+        Look::Shapes,
+        Look::Code,
+    ];
+
     pub fn code(self) -> u32 {
-        match self {
-            Look::Smooth => 0,
-            Look::Pixels => 1,
-            Look::Braille => 2,
-            Look::Ascii => 3,
-            Look::Led => 4,
-            Look::Shapes => 5,
-            Look::Code => 6,
-        }
+        code(Self::ALL, self)
     }
 
     pub fn name(self) -> &'static str {
@@ -136,16 +138,27 @@ pub const MODES: &[Mode] = &[
 ];
 
 impl Mode {
+    /// Every mode once, in the shader's order (`M_*`).
+    pub const ALL: &[Mode] = &[
+        Mode::Flat,
+        Mode::Turntable,
+        Mode::Fluid,
+        Mode::Reaction,
+        Mode::Life,
+        Mode::Fire,
+        Mode::Ripple,
+        Mode::Swarm,
+    ];
+
     pub fn code(self) -> u32 {
+        code(Self::ALL, self)
+    }
+
+    /// Whether the mode runs a simulation on the grid.
+    pub fn simulates(self) -> bool {
         match self {
-            Mode::Flat => 0,
-            Mode::Turntable => 1,
-            Mode::Fluid => 2,
-            Mode::Reaction => 3,
-            Mode::Life => 4,
-            Mode::Fire => 5,
-            Mode::Ripple => 6,
-            Mode::Swarm => 7,
+            Mode::Fluid | Mode::Reaction | Mode::Life | Mode::Fire | Mode::Ripple => true,
+            Mode::Flat | Mode::Turntable | Mode::Swarm => false,
         }
     }
 
@@ -178,6 +191,8 @@ pub enum Post {
     Crt,
     /// Film grain.
     Grain,
+    /// Shafts of light streaming out from the art.
+    Rays,
 }
 
 pub const POSTS: &[Post] = &[
@@ -190,19 +205,30 @@ pub const POSTS: &[Post] = &[
     Post::Chroma,
     Post::Crt,
     Post::Grain,
+    Post::Rays,
+    Post::Rays,
 ];
 
 impl Post {
+    /// Every effect once, in the shader's order (`P_*`).
+    pub const ALL: &[Post] = &[
+        Post::Clean,
+        Post::Bloom,
+        Post::Trails,
+        Post::Echo,
+        Post::Chroma,
+        Post::Crt,
+        Post::Grain,
+        Post::Rays,
+    ];
+
     pub fn code(self) -> u32 {
-        match self {
-            Post::Clean => 0,
-            Post::Bloom => 1,
-            Post::Trails => 2,
-            Post::Echo => 3,
-            Post::Chroma => 4,
-            Post::Crt => 5,
-            Post::Grain => 6,
-        }
+        code(Self::ALL, self)
+    }
+
+    /// Whether the effect adds bloom, so the bloom passes must run.
+    pub fn blooms(self) -> bool {
+        self != Post::Clean
     }
 
     pub fn name(self) -> &'static str {
@@ -214,6 +240,7 @@ impl Post {
             Post::Chroma => "chroma",
             Post::Crt => "crt",
             Post::Grain => "grain",
+            Post::Rays => "rays",
         }
     }
 }
@@ -328,35 +355,8 @@ impl Piece {
     fn height(&self) -> f32 {
         self.bitmap.height as f32
     }
-
-    /// Where screen position `(x, y)` lands on the bitmap at time `t`.
-    fn local(&self, idle: Idle, amplitude: f32, x: f32, y: f32, t: f32) -> (f32, f32) {
-        let (mut lx, mut ly) = (x - self.x, y - self.y);
-        let (cx, cy) = (self.width() / 2.0, self.height() / 2.0);
-        match idle {
-            // Letters hop only on the GPU; the CPU samples the art at rest.
-            Idle::Still | Idle::Bounce => {}
-            Idle::Float => ly -= amplitude * (t * 0.9).sin(),
-            Idle::Wave => {
-                ly -= amplitude * (lx / self.width().max(1.0) * TAU * 0.9 - t * 2.2).sin()
-            }
-            Idle::Breathe => {
-                let scale = 1.0 + 0.035 * (t * 1.2).sin();
-                lx = cx + (lx - cx) / scale;
-                ly = cy + (ly - cy) / scale;
-            }
-            Idle::Sway => {
-                let (sin, cos) = (0.04 * (t * 0.7).sin()).sin_cos();
-                let (dx, dy) = (lx - cx, ly - cy);
-                lx = cx + dx * cos + dy * sin;
-                ly = cy - dx * sin + dy * cos;
-            }
-        }
-        (lx, ly)
-    }
 }
 
-/// Which cells hold part of the art, for effects that treat it specially.
 /// Which letter each column of `bitmap` belongs to: letters are runs of
 /// columns with ink, split by empty ones.
 fn letters(bitmap: &Bitmap) -> Vec<u8> {
@@ -374,8 +374,6 @@ fn letters(bitmap: &Bitmap) -> Vec<u8> {
         .collect()
 }
 
-/// Words in a scene's settings block for the GPU.
-pub const BLOCK: usize = 64;
 const MAX_PIECES: usize = 2;
 const MAX_STOPS: usize = 5;
 
@@ -509,7 +507,7 @@ impl Stage {
                 cells.push((0..ROWS).any(|row| {
                     (0..COLS).any(|col| {
                         let (x, y) = (x0 + num::float(col) + 0.5, y0 + num::float(row) + 0.5);
-                        self.coverage(x, y, 0.0) > 0.5
+                        self.coverage(x, y) > 0.5
                     })
                 }));
             }
@@ -537,12 +535,13 @@ impl Stage {
         )
     }
 
-    /// How much of the art covers screen position `(x, y)`.
-    pub fn coverage(&self, x: f32, y: f32, t: f32) -> f32 {
+    /// How much of the art at rest covers screen position `(x, y)`. The GPU
+    /// moves it while it holds (`art.wgsl`).
+    pub fn coverage(&self, x: f32, y: f32) -> f32 {
         self.pieces
             .iter()
             .map(|piece| {
-                let (lx, ly) = piece.local(self.act.idle, self.amplitude, x, y, t);
+                let (lx, ly) = (x - piece.x, y - piece.y);
                 if lx < 0.0 || ly < 0.0 {
                     return 0.0;
                 }
@@ -596,7 +595,7 @@ impl Stage {
         f32::from(self.cols) / (f32::from(self.rows.max(1)) * self.cell_ratio)
     }
 
-    /// This scene's settings for the GPU (see `common.wgsl`), with its art
+    /// This scene's settings for the GPU (`params::S`), with its art
     /// starting at `art` in the art section and `age` seconds since it began.
     pub fn block(&self, art: u32, age: f32) -> [u32; BLOCK] {
         let mut block = [0; BLOCK];
@@ -606,26 +605,23 @@ impl Stage {
                 *slot = value;
             }
         };
-        put(0, code(SHADERS, self.act.shader));
-        put(1, code(BACKDROPS, self.act.backdrop));
-        put(2, code(IDLES, self.act.idle));
-        put(3, self.amplitude.to_bits());
-        put(4, num::u32_of(self.pieces.len().min(MAX_PIECES)));
-        put(5, num::u32_of(theme.stops.len().min(MAX_STOPS)));
-        put(6, self.act.mode.code());
-        put(7, self.act.style.code());
+        put(S::Shader.at(), code(SHADERS, self.act.shader));
+        put(S::Backdrop.at(), code(BACKDROPS, self.act.backdrop));
+        put(S::Idle.at(), code(IDLES, self.act.idle));
+        put(S::Amplitude.at(), self.amplitude.to_bits());
+        put(
+            S::Pieces.at(),
+            num::u32_of(self.pieces.len().min(MAX_PIECES)),
+        );
+        put(S::Stops.at(), num::u32_of(theme.stops.len().min(MAX_STOPS)));
+        put(S::Mode.at(), self.act.mode.code());
+        put(S::Style.at(), self.act.style.code());
         let colors = [theme.background, theme.accent]
             .into_iter()
             .chain(theme.stops.iter().take(MAX_STOPS).map(|&h| Rgb::hex(h)));
-        for (i, c) in colors.enumerate() {
-            for (j, v) in [c.0, c.1, c.2].into_iter().enumerate() {
-                put(
-                    8_usize
-                        .saturating_add(i.saturating_mul(3))
-                        .saturating_add(j),
-                    v.to_bits(),
-                );
-            }
+        let channels = colors.flat_map(|c| [c.0, c.1, c.2]);
+        for (i, v) in channels.enumerate() {
+            put(S::Background.at().saturating_add(i), v.to_bits());
         }
         let tallest = self
             .pieces
@@ -633,11 +629,14 @@ impl Stage {
             .map(|p| p.bitmap.height)
             .max()
             .unwrap_or(0);
-        put(29, age.to_bits());
-        put(48, self.act.variant);
-        put(30, num::float((tallest / 14).clamp(2, 24)).to_bits());
+        put(S::Age.at(), age.to_bits());
+        put(S::Variant.at(), self.act.variant);
         put(
-            31,
+            S::Width.at(),
+            num::float((tallest / 14).clamp(2, 24)).to_bits(),
+        );
+        put(
+            S::Glow.at(),
             self.pieces
                 .iter()
                 .map(|p| p.glow_radius)
@@ -646,7 +645,7 @@ impl Stage {
         );
         let mut offset = art;
         for (i, piece) in self.pieces.iter().take(MAX_PIECES).enumerate() {
-            let at = 32_usize.saturating_add(i.saturating_mul(8));
+            let at = S::Piece0.at().saturating_add(i.saturating_mul(PIECE_LEN));
             let (w, h) = (
                 num::u32_of(piece.bitmap.width),
                 num::u32_of(piece.bitmap.height),
@@ -658,8 +657,6 @@ impl Stage {
                 h,
                 piece.glow_radius.to_bits(),
                 offset,
-                w,
-                h,
             ];
             for (j, value) in fields.into_iter().enumerate() {
                 put(at.saturating_add(j), value);

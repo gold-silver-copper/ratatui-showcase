@@ -1,23 +1,39 @@
 // The scene pass: every sample of the frame, before post-processing.
 
-/// Scene `s` (as `layer`) at `(x, y)`, drawn the way its mode says.
+/// Scene `s` (as `layer`) at `(x, y)`, drawn the way its mode says: a
+/// simulation from its buffers while it runs, else as it last looked.
 fn layer_art(s: u32, layer: u32, x: f32, y: f32, t: f32, row: u32) -> Art {
     let m = mode(s);
     if m == M_TURNTABLE { return turntable(s, layer, x, y, t, row); }
-    let simulated = layer == 1u && m >= M_FLUID && m <= M_FIRE;
+    let simulated = m == M_FLUID || m == M_REACTION || m == M_LIFE || m == M_FIRE;
     // Far from flat art there is nothing to draw: not even glow or shadow.
+    // Art too fine for the field to find any edge is drawn regardless.
     let reach = max(pf(s + S_GLOW), 1.0) * 6.0 + max(pf(s + S_WIDTH), 1.0) * 3.0;
-    if !simulated && sdf(layer, x, y) > reach { return Art(vec3(0.0), 0.0, vec3(0.0), 0.0, 0.0); }
-    if layer == 1u {
-        if m == M_FLUID || m == M_REACTION || m == M_LIFE || m == M_FIRE { return sim_art(s, x, y, t, row); }
-        if m == M_SWARM {
-            var ghost = art(s, layer, x, y, t, row);
-            ghost.alpha *= 0.1;
-            ghost.glow *= 0.5;
-            return ghost;
-        }
+    let d = sdf(layer, x, y);
+    if !simulated && d > reach && d < FAR * 0.5 { return Art(vec3(0.0), 0.0, vec3(0.0), 0.0, 0.0); }
+    if simulated {
+        if params[H_SIM_SCENE] == s { return sim_art(s, layer, x, y, t, row, sim_latest()); }
+        return frozen(x, y);
+    }
+    if m == M_SWARM {
+        var ghost = art(s, layer, x, y, t, row);
+        ghost.alpha *= 0.1;
+        ghost.glow *= 0.5;
+        return ghost;
     }
     return art(s, layer, x, y, t, row);
+}
+
+/// How far water bends the view at `p`: the new scene's, or the old one's
+/// as it goes.
+fn water(p: vec2<f32>) -> vec2<f32> {
+    let sim = params[H_SIM_SCENE];
+    let fading = 1.0 - progress();
+    if sim != 0u && mode(sim) == M_RIPPLE {
+        return ripple_offset(sim_latest(), p) * select(1.0, fading, sim == H_FROM && kind() != K_STILL);
+    }
+    if kind() != K_STILL && mode(H_FROM) == M_RIPPLE { return ripple_offset(H_SNAPSHOT, p) * fading; }
+    return vec2(0.0);
 }
 
 /// Darkening behind the art over busy backgrounds, so it stays readable.
@@ -28,8 +44,8 @@ fn halo(s: u32, layer: u32, x: f32, y: f32) -> f32 {
 }
 
 @compute @workgroup_size(64)
-fn scene(@builtin(global_invocation_id) id: vec3<u32>) {
-    let i = id.x;
+fn scene(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
     if i >= img_w() * img_h() { return; }
     let sx = i % img_w();
     let sy = i / img_w();
@@ -40,8 +56,8 @@ fn scene(@builtin(global_invocation_id) id: vec3<u32>) {
 
     // Water bends everything under it.
     var glint = 0.0;
-    if mode(H_TO) == M_RIPPLE {
-        let o = ripple_offset(p);
+    let o = water(p);
+    if any(o != vec2(0.0)) {
         p += o * 5.0;
         let n = normalize(vec3(-o * 1.2, 1.0));
         glint = pow(max(dot(n, normalize(vec3(-0.4, -0.6, 0.7))), 0.0), 90.0) * 0.5;

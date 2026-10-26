@@ -1,14 +1,7 @@
 // Post-processing: bloom at three sizes (bright pass, halving, separable
-// blurs), then one pass for depth of field, feedback trails, the zoom echo,
-// chromatic aberration, a CRT's curve and glow, and film grain.
-
-const P_CLEAN: u32 = 0u;
-const P_BLOOM: u32 = 1u;
-const P_TRAILS: u32 = 2u;
-const P_ECHO: u32 = 3u;
-const P_CHROMA: u32 = 4u;
-const P_CRT: u32 = 5u;
-const P_GRAIN: u32 = 6u;
+// blurs; skipped for clean frames), then one pass for depth of field,
+// feedback trails, the zoom echo, chromatic aberration, a CRT's curve and
+// glow, film grain and light shafts.
 
 /// The two buffers of bloom `level`.
 fn bloom_a(level: u32) -> u32 { return select(select(H_BLOOM4, H_BLOOM2, level == 1u), H_BLOOM0, level == 0u); }
@@ -17,9 +10,9 @@ fn bloom_b(level: u32) -> u32 { return select(select(H_BLOOM5, H_BLOOM3, level =
 /// Level STEP of the bloom chain: the scene's bright parts, at a quarter of
 /// the resolution, then each level half the one before.
 @compute @workgroup_size(64)
-fn bloom_down(@builtin(global_invocation_id) id: vec3<u32>) {
+fn bloom_down(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
     let level = STEP;
-    let i = id.x;
+    let i = thread(id, groups);
     if i >= bloom_w(level) * bloom_h(level) { return; }
     let bx = i % bloom_w(level);
     let by = i / bloom_w(level);
@@ -45,9 +38,9 @@ fn bloom_down(@builtin(global_invocation_id) id: vec3<u32>) {
 /// Blurs bloom level STEP: across into its second buffer (FLIP 0), then
 /// down back into its first (FLIP 1).
 @compute @workgroup_size(64)
-fn bloom_blur(@builtin(global_invocation_id) id: vec3<u32>) {
+fn bloom_blur(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
     let level = STEP;
-    let i = id.x;
+    let i = thread(id, groups);
     if i >= bloom_w(level) * bloom_h(level) { return; }
     let src = select(bloom_a(level), bloom_b(level), FLIP == 1u);
     let dst = select(bloom_b(level), bloom_a(level), FLIP == 1u);
@@ -83,6 +76,28 @@ fn bloom_sample(p: vec2<f32>) -> vec3<f32> {
     return bloom_level(0u, p) + bloom_level(1u, p) * 0.8 + bloom_level(2u, p) * 0.6;
 }
 
+/// Light shafts: the bright parts of the frame smeared out from the art's
+/// centre, as if it shone through haze.
+fn rays(p: vec2<f32>) -> vec3<f32> {
+    let centre = art_bounds(H_TO).centre;
+    let step = (centre - p) * 0.045;
+    var q = p;
+    var weight = 1.0;
+    var total = 0.0;
+    var sum = vec3(0.0);
+    for (var k = 0; k < 16; k++) {
+        q += step;
+        sum += bloom_level(0u, q) * weight;
+        total += weight;
+        weight *= 0.9;
+    }
+    return sum / total * 0.6;
+}
+
+/// How much of the last frame survives this one, from how much survives a
+/// sixtieth of a second, so feedback fades as fast at any frame rate.
+fn persist(per_tick: f32) -> f32 { return pow(per_tick, clamp(pf(H_DT), 0.0, 0.1) * 60.0); }
+
 /// Depth of field: a disc blur as wide as the scene asked for.
 fn focused(p: vec2<f32>) -> vec3<f32> {
     let here = img_load(H_SCENE, p);
@@ -98,8 +113,8 @@ fn focused(p: vec2<f32>) -> vec3<f32> {
 }
 
 @compute @workgroup_size(64)
-fn post(@builtin(global_invocation_id) id: vec3<u32>) {
-    let i = id.x;
+fn post(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
     if i >= img_w() * img_h() { return; }
     let sx = i % img_w();
     let sy = i / img_w();
@@ -114,7 +129,7 @@ fn post(@builtin(global_invocation_id) id: vec3<u32>) {
         uv *= 1.0 + 0.07 * dot(uv, uv);
         p = (uv + 1.0) / 2.0 * size;
         if abs(uv.x) > 1.0 || abs(uv.y) > 1.0 {
-            state[params[H_FINAL] + i] = vec4(0.0, 0.0, 0.0, 1.0);
+            frames[final_index(0u, vec2(f32(sx), f32(sy)))] = 0u;
             return;
         }
     }
@@ -124,23 +139,29 @@ fn post(@builtin(global_invocation_id) id: vec3<u32>) {
         let shift = (p - centre) / size * 6.0;
         c = vec3(img_load(H_SCENE, p + shift).r, c.g, img_load(H_SCENE, p - shift).b);
     }
-    let strength = select(0.35, 1.0, effect == P_BLOOM);
-    c += bloom_sample(p) * strength;
+    // Clean frames have no bloom: its passes didn't run.
+    if effect != P_CLEAN {
+        c += bloom_sample(p) * select(0.35, 1.0, effect == P_BLOOM);
+    }
+    if effect == P_RAYS {
+        c += rays(p);
+    }
 
-    // Feedback from the previous frame.
+    // Feedback from the previous frame. Scanlines and grain change per half
+    // cell, the finest detail the characters keep.
     if effect == P_TRAILS {
-        c = max(c, img_load(H_PREVIOUS, p).rgb * 0.88);
+        c = max(c, final_load(1u, p) * persist(0.88));
     } else if effect == P_ECHO {
         let q = centre + rot(0.012) * (p - centre) * 0.975;
-        c = max(c, img_load(H_PREVIOUS, q).rgb * 0.9);
+        c = max(c, final_load(1u, q) * persist(0.9));
     } else if effect == P_CRT {
-        c = max(c, img_load(H_PREVIOUS, p).rgb * 0.55);
-        c *= select(1.0, 0.78, sy % 2u == 1u);
+        c = max(c, final_load(1u, p) * persist(0.55));
+        c *= select(1.0, 0.72, (sy / 4u) % 2u == 1u);
         c *= 1.0 - 0.25 * dot(uv, uv);
     }
     if effect == P_GRAIN {
-        c += vec3((hash3(sx, sy, frame()) - 0.5) * 0.09);
+        c += vec3((hash3(sx / 4u, sy / 4u, frame()) - 0.5) * 0.12);
         c *= 1.0 - 0.3 * dot(uv * 0.7, uv * 0.7);
     }
-    state[params[H_FINAL] + i] = vec4(max(c, vec3(0.0)), 1.0);
+    frames[final_index(0u, vec2(f32(sx), f32(sy)))] = pack4x8unorm(vec4(clamp(c, vec3(0.0), vec3(1.0)), 1.0));
 }

@@ -1,13 +1,15 @@
 // The art of a scene: its pieces (bitmaps), how they move while holding,
 // their distance fields, and how each style colours them.
 
-struct Piece { x: f32, y: f32, w: f32, h: f32, glow: f32, offset: u32, stride: u32, rows: u32 }
+struct Piece { x: f32, y: f32, w: f32, h: f32, glow: f32, offset: u32 }
 
 fn piece(s: u32, i: u32) -> Piece {
     let b = s + S_PIECE0 + i * PIECE_LEN;
-    return Piece(pf(b), pf(b + 1u), f32(params[b + 2u]), f32(params[b + 3u]), pf(b + 4u),
-        params[b + 5u], params[b + 6u], params[b + 7u]);
+    return Piece(pf(b), pf(b + 1u), f32(params[b + 2u]), f32(params[b + 3u]), pf(b + 4u), params[b + 5u]);
 }
+
+/// Which letter column `x` of the piece belongs to.
+fn letter(p: Piece, x: f32) -> f32 { return f32(inputs[params[H_IN_ART] + p.offset + u32(x)] >> 24u); }
 
 /// Where screen position `(x, y)` lands on the piece at time `t`.
 fn local(s: u32, p: Piece, x: f32, y: f32, t: f32) -> vec2<f32> {
@@ -15,18 +17,14 @@ fn local(s: u32, p: Piece, x: f32, y: f32, t: f32) -> vec2<f32> {
     let c = vec2(p.w, p.h) / 2.0;
     let amplitude = pf(s + S_AMPLITUDE);
     switch params[s + S_IDLE] {
-        case 1u: { l.y -= amplitude * sin(t * 0.9); }
-        case 2u: { l.y -= amplitude * sin(l.x / max(p.w, 1.0) * TAU * 0.9 - t * 2.2); }
-        case 3u: { l = c + (l - c) / (1.0 + 0.035 * sin(t * 1.2)); }
-        case 4u: {
-            let a = 0.04 * sin(t * 0.7);
-            l = c + rot(-a) * (l - c);
-        }
-        case 5u: {
+        case I_FLOAT: { l.y -= amplitude * sin(t * 0.9); }
+        case I_WAVE: { l.y -= amplitude * sin(l.x / max(p.w, 1.0) * TAU * 0.9 - t * 2.2); }
+        case I_BREATHE: { l = c + (l - c) / (1.0 + 0.035 * sin(t * 1.2)); }
+        case I_SWAY: { l = c + rot(-0.04 * sin(t * 0.7)) * (l - c); }
+        case I_BOUNCE: {
             // Letters hop one after another: each column knows its letter.
             if l.x >= 0.0 && l.x < p.w {
-                let letter = f32(inputs[params[H_IN_ART] + p.offset + u32(l.x)] >> 24u);
-                l.y += amplitude * 3.0 * abs(sin(t * 2.6 - letter * 0.55));
+                l.y += amplitude * 3.0 * abs(sin(t * 2.6 - letter(p, l.x) * 0.55));
             }
         }
         default: {}
@@ -34,10 +32,33 @@ fn local(s: u32, p: Piece, x: f32, y: f32, t: f32) -> vec2<f32> {
     return l;
 }
 
+/// Where the art's point `(x, y)` at rest is now: `local` the other way, so
+/// particles leave from and land on the art as it moves.
+fn placed(s: u32, x: f32, y: f32) -> vec2<f32> {
+    let t = time();
+    let amplitude = pf(s + S_AMPLITUDE);
+    for (var i = 0u; i < params[s + S_PIECES]; i++) {
+        let p = piece(s, i);
+        var l = vec2(x - p.x, y - p.y);
+        if l.x < 0.0 || l.y < 0.0 || l.x >= p.w || l.y >= p.h { continue; }
+        let c = vec2(p.w, p.h) / 2.0;
+        switch params[s + S_IDLE] {
+            case I_FLOAT: { l.y += amplitude * sin(t * 0.9); }
+            case I_WAVE: { l.y += amplitude * sin(l.x / max(p.w, 1.0) * TAU * 0.9 - t * 2.2); }
+            case I_BREATHE: { l = c + (l - c) * (1.0 + 0.035 * sin(t * 1.2)); }
+            case I_SWAY: { l = c + rot(0.04 * sin(t * 0.7)) * (l - c); }
+            case I_BOUNCE: { l.y -= amplitude * 3.0 * abs(sin(t * 2.6 - letter(p, l.x) * 0.55)); }
+            default: {}
+        }
+        return vec2(p.x, p.y) + l;
+    }
+    return vec2(x, y);
+}
+
 /// The packed pixel (ink, material, parameter, letter) under `l`.
 fn texel(p: Piece, l: vec2<f32>) -> u32 {
     if l.x < 0.0 || l.y < 0.0 || l.x >= p.w || l.y >= p.h { return 0u; }
-    return inputs[params[H_IN_ART] + p.offset + u32(l.y) * p.stride + u32(l.x)];
+    return inputs[params[H_IN_ART] + p.offset + u32(l.y) * u32(p.w) + u32(l.x)];
 }
 
 fn coverage(s: u32, x: f32, y: f32, t: f32) -> f32 {
@@ -55,8 +76,8 @@ fn layer_coverage(layer: u32, x: f32, y: f32) -> f32 {
 }
 
 /// Signed distance in samples to the edge of scene `layer`'s art: negative
-/// inside. Jump flooding (jfa.wgsl) rebuilds it each frame on the grid; a
-/// bilinear read keeps it smooth enough for normals.
+/// inside. Jump flooding (jfa.wgsl) builds it on the grid; a bilinear read
+/// keeps it smooth enough for normals.
 fn sdf(layer: u32, x: f32, y: f32) -> f32 {
     let d = grid_sample(H_FIELD1, vec2(x, y));
     return select(d.x, d.y, layer == 1u);
@@ -110,18 +131,18 @@ fn art(s: u32, layer: u32, x: f32, y: f32, t: f32, row: u32) -> Art {
     let glow = exp(-max(d, 0.0) / radius) * select(0.0, 1.0, d > 0.0);
     out.glow = ink * glow * 0.3;
     switch style(s) {
-        case 1u: {
+        case ST_OUTLINE: {
             out.color = ink;
             out.alpha = clamp(min(-d, d + width) + 0.5, 0.0, 1.0);
         }
-        case 2u: {
+        case ST_NEON: {
             let centre = d + width * 0.5;
             out.alpha = clamp(1.0 - abs(centre) / (width * 0.9), 0.0, 1.0);
             let core = exp(-pow(centre / (width * 0.35), 2.0));
             out.color = lerp(ink, WHITE, core * 0.8);
             out.glow = ink * exp(-max(d, 0.0) / (radius * 2.0)) * select(0.0, 1.0, d > 0.0) * 0.7;
         }
-        case 3u: {
+        case ST_BEVEL: {
             let bevel = width * 1.5;
             let e = 1.5;
             let grad = vec2(sdf(layer, x + e, y) - sdf(layer, x - e, y), sdf(layer, x, y + e) - sdf(layer, x, y - e)) / (2.0 * e);
@@ -132,7 +153,7 @@ fn art(s: u32, layer: u32, x: f32, y: f32, t: f32, row: u32) -> Art {
             let spec = pow(max(dot(reflect(-l, n), vec3(0.0, 0.0, 1.0)), 0.0), 28.0);
             out.color = out.color * (0.3 + 0.85 * diffuse) + WHITE * spec * 0.7;
         }
-        case 4u: {
+        case ST_SHADOW: {
             let offset = vec2(width * 1.2, width * 1.8);
             let behind = sdf(layer, x - offset.x, y - offset.y);
             out.shadow = clamp(0.5 - behind / radius, 0.0, 1.0) * 0.75;

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use ab_glyph::{Font, FontVec, PxScale, Rect, ScaleFont, point};
+use ab_glyph::{Font, FontRef, FontVec, PxScale, Rect, ScaleFont, point};
 use bevy::prelude::*;
 
 use crate::art::{Bitmap, Material, Px};
@@ -48,12 +48,14 @@ impl SystemFonts {
     pub fn pick(&self, text: &str) -> Option<Face> {
         (0..32).find_map(|_| {
             let id = *self.faces.get(fastrand::usize(..self.faces.len().max(1)))?;
+            // Check the glyphs on the borrowed file; copy only the one used.
             let font = self.db.with_face_data(id, |data, index| {
+                let borrowed = FontRef::try_from_slice_and_index(data, index).ok()?;
+                if text.chars().any(|c| borrowed.glyph_id(c).0 == 0) {
+                    return None;
+                }
                 FontVec::try_from_vec_and_index(data.to_vec(), index).ok()
             })??;
-            if text.chars().any(|c| font.glyph_id(c).0 == 0) {
-                return None;
-            }
             let info = self.db.face(id)?;
             let family = info.families.first().map_or("", |(name, _)| name.as_str());
             Some(Face {

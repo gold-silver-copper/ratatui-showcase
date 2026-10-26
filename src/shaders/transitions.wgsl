@@ -9,12 +9,12 @@ fn warp(layer: u32, x: f32, y: f32) -> vec3<f32> {
     let h = height();
     let c = vec2(w, h) / 2.0;
     switch kind() {
-        case 9u: {
+        case K_ZOOM: {
             var s = 0.15 + 0.85 * ease_out_back(clamp((p - 0.35) / 0.65, 0.0, 1.0));
             if layer == 0u { s = 1.0 + 3.0 * ease_in(p / 0.6); }
             return vec3(c + (vec2(x, y) - c) / s, 1.0);
         }
-        case 10u, 11u: {
+        case K_SWIRL, K_RIPPLE: {
             let strength = sin(p * PI);
             let d = vec2(x, y) - c;
             let r = length(d);
@@ -26,11 +26,11 @@ fn warp(layer: u32, x: f32, y: f32) -> vec3<f32> {
             let scale = select(1.0, (r + wave) / r, r > 0.0);
             return vec3(c + d * scale, 1.0);
         }
-        case 12u: {
+        case K_MOSAIC: {
             let block = 1.0 + pow(sin(p * PI), 1.2) * min(w, h) * 0.09;
             return vec3((floor(vec2(x, y) / block) + 0.5) * block, 1.0);
         }
-        case 13u: {
+        case K_SLICES: {
             let band = clamp(floor(y / h * 10.0), 0.0, 9.0);
             let dir = select(-1.0, 1.0, u32(band) % 2u == 0u);
             let delay = band / 10.0 * 0.25;
@@ -39,8 +39,8 @@ fn warp(layer: u32, x: f32, y: f32) -> vec3<f32> {
             }
             return vec3(x + dir * (1.0 - ease_out(clamp((p - 0.3 - delay) / 0.45, 0.0, 1.0))) * w * 1.1, y, 1.0);
         }
-        case 14u: { return vec3(x - glitch_shift(y), y, 1.0); }
-        case 15u: {
+        case K_GLITCH: { return vec3(x - glitch_shift(y), y, 1.0); }
+        case K_CRT: {
             let sq = crt_squash();
             if abs(x - c.x) >= w / 2.0 * sq.x || abs(y - c.y) >= h / 2.0 * sq.y { return vec3(0.0); }
             return vec3(c + (vec2(x, y) - c) / sq, 1.0);
@@ -55,15 +55,15 @@ fn opacity(layer: u32, x: f32, y: f32) -> f32 {
     let k = kind();
     var to = 1.0;
     switch k {
-        case 0u: { to = 1.0; }
-        case 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u: { to = wipe_mix(x / width(), y / height()); }
-        case 9u: { if layer == 0u { return 1.0 - smoothed(0.3, 0.6, p); } to = smoothed(0.35, 0.55, p); }
-        case 10u, 11u: { to = smoothed(0.4, 0.6, p); }
-        case 12u: { to = smoothed(0.45, 0.55, p); }
-        case 13u: { return 1.0; }
-        case 14u: { to = select(0.0, 1.0, glitch_shows_new(y)); }
-        case 15u: { to = select(0.0, 1.0, p >= 0.5); }
-        case 22u: { return 0.0; }
+        case K_STILL: { to = 1.0; }
+        case K_RADIAL_WIPE, K_DIAMOND_WIPE, K_CLOCK_WIPE, K_SPIRAL_WIPE, K_DIAGONAL_WIPE, K_BLINDS, K_CHECKERBOARD, K_BURN: { to = wipe_mix(x / width(), y / height()); }
+        case K_ZOOM: { if layer == 0u { return 1.0 - smoothed(0.3, 0.6, p); } to = smoothed(0.35, 0.55, p); }
+        case K_SWIRL, K_RIPPLE: { to = smoothed(0.4, 0.6, p); }
+        case K_MOSAIC: { to = smoothed(0.45, 0.55, p); }
+        case K_SLICES: { return 1.0; }
+        case K_GLITCH: { to = select(0.0, 1.0, glitch_shows_new(y)); }
+        case K_CRT: { to = select(0.0, 1.0, p >= 0.5); }
+        case K_MELT: { return 0.0; }
         default: {
             if layer == 0u { return 1.0 - smoothed(0.0, 0.06, p); }
             return smoothed(0.94, 1.0, p);
@@ -76,17 +76,17 @@ fn opacity(layer: u32, x: f32, y: f32) -> f32 {
 fn backdrop_mix(x: f32, y: f32) -> f32 {
     let p = progress();
     switch kind() {
-        case 0u: { return 1.0; }
-        case 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u: { return wipe_mix(x, y); }
-        case 9u: { return smoothed(0.35, 0.55, p); }
-        case 10u, 11u: { return smoothed(0.4, 0.6, p); }
-        case 12u: { return smoothed(0.45, 0.55, p); }
-        case 13u: {
+        case K_STILL: { return 1.0; }
+        case K_RADIAL_WIPE, K_DIAMOND_WIPE, K_CLOCK_WIPE, K_SPIRAL_WIPE, K_DIAGONAL_WIPE, K_BLINDS, K_CHECKERBOARD, K_BURN: { return wipe_mix(x, y); }
+        case K_ZOOM: { return smoothed(0.35, 0.55, p); }
+        case K_SWIRL, K_RIPPLE: { return smoothed(0.4, 0.6, p); }
+        case K_MOSAIC: { return smoothed(0.45, 0.55, p); }
+        case K_SLICES: {
             let band = clamp(floor(y * 10.0), 0.0, 9.0);
             return ease_out(clamp((p - 0.3 - band / 10.0 * 0.25) / 0.45, 0.0, 1.0));
         }
-        case 14u: { return select(0.0, 1.0, glitch_shows_new(y * height())); }
-        case 15u: { return select(0.0, 1.0, p >= 0.5); }
+        case K_GLITCH: { return select(0.0, 1.0, glitch_shows_new(y * height())); }
+        case K_CRT: { return select(0.0, 1.0, p >= 0.5); }
         default: { return smoothed(0.2, 0.8, p); }
     }
 }
@@ -98,7 +98,7 @@ fn light(x: f32, y: f32) -> vec3<f32> {
     let h = height();
     let c = vec2(w, h) / 2.0;
     let k = kind();
-    if k >= 1u && k <= K_BURN {
+    if k >= K_RADIAL_WIPE && k <= K_BURN {
         let m = wipe_mix(x / w, y / h);
         let band = 4.0 * m * (1.0 - m);
         let col = select(accent(H_TO), lerp(hex(0xff5a00u), hex(0xffe08au), band), k == K_BURN);
@@ -144,13 +144,13 @@ fn field(x: f32, y: f32) -> f32 {
     let radius = length(d) / sqrt(0.25 * aspect * aspect + 0.25);
     let angle = wrap(atan2(d.y, d.x) / TAU + 0.25);
     switch kind() {
-        case 1u: { return radius; }
-        case 2u: { return (abs(d.x) + abs(d.y)) / (0.5 * aspect + 0.5); }
-        case 3u: { return angle; }
-        case 4u: { return 0.55 * radius + 0.45 * wrap(angle + radius * 1.5); }
-        case 5u: { return (x + y) / 2.0; }
-        case 6u: { return fract(y * 8.0) * 0.7 + x * 0.3; }
-        case 7u: { return hashf(x * 16.0, y * 9.0) * 0.8 + x * 0.2; }
+        case K_RADIAL_WIPE: { return radius; }
+        case K_DIAMOND_WIPE: { return (abs(d.x) + abs(d.y)) / (0.5 * aspect + 0.5); }
+        case K_CLOCK_WIPE: { return angle; }
+        case K_SPIRAL_WIPE: { return 0.55 * radius + 0.45 * wrap(angle + radius * 1.5); }
+        case K_DIAGONAL_WIPE: { return (x + y) / 2.0; }
+        case K_BLINDS: { return fract(y * 8.0) * 0.7 + x * 0.3; }
+        case K_CHECKERBOARD: { return hashf(x * 16.0, y * 9.0) * 0.8 + x * 0.2; }
         default: {
             let n = value_noise(vec2(x * 5.0 * aspect, y * 5.0)) * 0.65 + value_noise(vec2(x * 13.0 * aspect, y * 13.0)) * 0.35;
             return clamp(n * 1.4 - 0.2, 0.0, 1.0);

@@ -49,6 +49,17 @@ pub const STYLES: &[Style] = &[
 ];
 
 impl Style {
+    /// Every style once (`ST_*`).
+    pub const ALL: &[Style] = &[
+        Style::Solid,
+        Style::Outline,
+        Style::Neon,
+        Style::Bevel,
+        Style::Shadow,
+        Style::Extrude,
+        Style::Reflect,
+    ];
+
     /// The share of the layout box the plain art may use, leaving room for
     /// what the style adds.
     pub fn reserve(self) -> (f32, f32) {

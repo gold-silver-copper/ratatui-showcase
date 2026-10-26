@@ -4,7 +4,7 @@
 fn line(v: f32, w: f32) -> f32 { return max(1.0 - abs(wrap(v) - 0.5) * 2.0 / w, 0.0); }
 
 /// Whether a backdrop is busy enough that the art needs a dark halo.
-fn busy(s: u32) -> bool { return params[s + S_BACKDROP] >= 5u; }
+fn busy(s: u32) -> bool { return params[s + S_BACKDROP] >= B_JULIA; }
 
 /// Screen position as a point on the complex plane, `scale` high.
 fn plane(x: f32, y: f32, centre: vec2<f32>, scale: f32) -> vec2<f32> {
@@ -140,9 +140,9 @@ fn warp_stars(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
         let depth = wrap(seed * 7.0 + t * speed);
         let star = depth * depth * 0.9;
         let trail = 0.01 + depth * 0.08;
-        let along = smoothstep(trail, 0.0, abs(r - star));
+        let along = 1.0 - smoothstep(0.0, trail, abs(r - star));
         let across = abs(wrap((a / TAU + 0.5) * sectors) - 0.5);
-        let core = smoothstep(0.5, 0.05, across);
+        let core = 1.0 - smoothstep(0.05, 0.5, across);
         light += lerp(sample(s, seed), WHITE, 0.5) * along * core * depth;
     }
     return background(s) + light;
@@ -247,13 +247,13 @@ fn backdrop(s: u32, x: f32, y: f32, px: u32, py: u32, t: f32) -> vec3<f32> {
     let dither = hash(px, py + 7u) * 2.5 / 255.0;
     let base = background(s) * (1.6 - 1.8 * (dx * dx + dy * dy)) + vec3(dither);
     switch params[s + S_BACKDROP] {
-        case 1u: {
+        case B_STARS: {
             let seed = hash(px / 2u, py / 4u);
             if seed > 0.006 { return base; }
             let twinkle = sin(((t * (0.5 + seed * 300.0)) + seed * 1000.0) * TAU) * 0.5 + 0.5;
             return base + lerp(WHITE, sample(s, seed * 100.0), 0.4) * pow(twinkle, 3.0) * 0.75;
         }
-        case 2u: {
+        case B_GRID: {
             let horizon = 0.58;
             let glow = sample(s, 0.15) * 0.35 * exp(-pow((y - horizon) * 14.0, 2.0));
             if y < horizon { return base + sample(s, 0.75) * 0.12 * pow(y / horizon, 2.0) + glow; }
@@ -264,42 +264,42 @@ fn backdrop(s: u32, x: f32, y: f32, px: u32, py: u32, t: f32) -> vec3<f32> {
             let grid = max(line(z, 0.12), line(lane, 0.08 * min(depth, 10.0) / 4.0));
             return base + sample(s, 0.0) * grid * 0.45 * fade + glow;
         }
-        case 3u: {
+        case B_AURORA: {
             let wave = sin(x * 3.0 + t * 0.15) * 0.08 + sin(x * 7.0 - t * 0.1) * 0.04;
             let band = exp(-pow((y - 0.32 - wave) * 6.0, 2.0));
             let rays = sin(x * 40.0 + sin(x * 5.0 + t * 0.3) * 6.0) * 0.35 + 0.65;
             return base + sample(s, x * 0.6 + t * 0.02) * band * rays * 0.28;
         }
-        case 4u: {
+        case B_RAYS: {
             let angle = atan2(dy / max(aspect, 0.1), dx) / TAU;
             let beam = abs(wrap(angle * 14.0 + t * 0.04) - 0.5) * 2.0;
             let falloff = max(1.0 - sqrt(dx * dx + dy * dy) * 1.4, 0.0);
             return base + sample(s, 0.3) * beam * beam * falloff * 0.12;
         }
         // Fractals are vivid; dimmed, they let the art lead.
-        case 5u: { return julia(s, x, y, t) * 0.7; }
-        case 6u: { return mandelbrot(s, x, y, t) * 0.7; }
-        case 7u: { return burning_ship(s, x, y, t) * 0.75; }
-        case 8u: { return newton(s, x, y, t) * 0.6; }
-        case 9u: { return kaleidoscope(s, x, y, t) * 0.65; }
-        case 10u: { return tunnel(s, x, y, t) * 0.5; }
-        case 11u: { return warp_stars(s, x, y, t); }
-        case 12u: { return mandelbulb(s, x, y, t) * 0.75; }
-        case 13u: { return menger_sponge(s, x, y, t) * 0.75; }
+        case B_JULIA: { return julia(s, x, y, t) * 0.7; }
+        case B_MANDELBROT: { return mandelbrot(s, x, y, t) * 0.7; }
+        case B_SHIP: { return burning_ship(s, x, y, t) * 0.75; }
+        case B_NEWTON: { return newton(s, x, y, t) * 0.6; }
+        case B_KALEIDOSCOPE: { return kaleidoscope(s, x, y, t) * 0.65; }
+        case B_TUNNEL: { return tunnel(s, x, y, t) * 0.5; }
+        case B_WARP: { return warp_stars(s, x, y, t); }
+        case B_MANDELBULB: { return mandelbulb(s, x, y, t) * 0.75; }
+        case B_MENGER: { return menger_sponge(s, x, y, t) * 0.75; }
         // Flames and attractors are drawn over this from their histogram.
-        case 14u, 15u, 16u, 17u: { return background(s) * 0.7 + vec3(dither); }
+        case B_FLAME, B_CLIFFORD, B_DE_JONG, B_LORENZ: { return background(s) * 0.7 + vec3(dither); }
         default: { return base; }
     }
 }
 
 /// Whether a backdrop is drawn by splatting points (flames, attractors).
-fn splatted(s: u32) -> bool { let b = params[s + S_BACKDROP]; return b >= 14u && b <= 17u; }
+fn splatted(s: u32) -> bool { let b = params[s + S_BACKDROP]; return b >= B_FLAME && b <= B_LORENZ; }
 
 /// Backgrounds for the grid, for the scene to sample: the new scene's
 /// always, the old one's while a transition shows it.
 @compute @workgroup_size(64)
-fn backdrops(@builtin(global_invocation_id) id: vec3<u32>) {
-    let i = id.x;
+fn backdrops(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
     if i >= grid_w() * grid_h() { return; }
     let gx = i % grid_w();
     let gy = i / grid_w();

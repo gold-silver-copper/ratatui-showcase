@@ -28,10 +28,10 @@ cargo run --release -- --profile   # GPU time per phase in the caption
 
 | Option | Meaning |
 | --- | --- |
-| `--hold SECONDS` | How long each scene stays (default 7) |
-| `--fps N` | Frames per second (default 60) |
+| `--hold SECONDS` | How long each scene stays, 0.5 to 86400 (default 7) |
+| `--fps N` | Frames per second, 1 to 1000 (default 60). Simulations run at the same speed at any rate. |
 | `--glyphs blocks\|sextants\|full` | Block characters your terminal draws well. `full` (the default) adds octants and diagonal wedges, which foot, kitty, ghostty and wezterm draw themselves; use `sextants` or `blocks` elsewhere. |
-| `--watch` | Reload the shaders in `src/shaders` whenever they change; a broken edit keeps the last good shader and shows the error in the caption. |
+| `--watch` | Reload the shaders in `src/shaders` whenever they change; an edit that doesn't compile, or whose pipelines fail to build, leaves the running shader in place and shows the error in the caption. |
 | `--profile` | Show the GPU time of each phase in the caption (timestamp queries). |
 | `--dither` | Dither colours over time for smoother gradients; every cell then changes every frame, so the terminal works about three times as hard. |
 
@@ -57,7 +57,8 @@ cargo run --release -- --profile   # GPU time per phase in the caption
 - **Shaders:** flow, plasma, pulse, sheen, rainbow, scanline, chrome, holo,
   fire, stripes, marble, lava, gold and glitter.
 - **Post-processing:** bloom at three sizes, motion trails, a zoom echo, chromatic aberration,
-  a curved CRT with phosphor glow, or film grain.
+  a curved CRT with phosphor glow, film grain, or shafts of light streaming
+  out from the art.
 - **Motion while holding:** still, floating, waving, breathing, swaying, or
   letters bouncing one after another.
 - **Looks:** smooth block glyphs, chunky pixels, braille dots, ASCII by
@@ -87,13 +88,16 @@ window. Each frame is a chain of compute passes (`src/shaders`):
 3. **Distance fields**: jump flooding finds, for every point, the nearest edge
    of each scene's art, kept as a grid of signed distances. They give the
    glow, outlines, neon, bevels, shadows, the 3D solid and the melt, and let
-   the scene skip everything far from the art.
+   the scene skip everything far from the art. While the art holds still they
+   are kept from frame to frame.
 4. **Backgrounds** at a quarter of the samples, sampled smoothly: fractals and
    ray-marching cost a quarter as much. The Mandelbrot zoom follows a reference
    orbit computed in double precision on the CPU, so it can go to 1e-8 in f32.
 5. **Simulations**: the fluid (advection, vorticity confinement, a pressure
-   solve), reaction-diffusion, Life, fire and ripples; their state stays on the
-   GPU between frames.
+   solve), reaction-diffusion, Life, fire and ripples, stepped 60 times a second
+   whatever the frame rate; their state stays on the GPU between frames. When
+   the next scene simulates too, the old one's last look is frozen for the
+   transition; otherwise it keeps running until it is gone.
 6. **Scene**: every sample (4x8 per cell) gets its background, art, light and
    particles.
 7. **Bloom** at three sizes, then **post-processing** with depth of field and
@@ -103,9 +107,16 @@ window. Each frame is a chain of compute passes (`src/shaders`):
    eighths, sextants, octants or diagonal wedges), so edges stay crisp at any
    size. The terminal's pixel size, where it reports one, keeps proportions.
 
-One glyph and two colours per cell come back for ratatui to print. A GPU with
-Vulkan, Metal or DirectX 12 drivers is needed. Most of the CPU time goes to
-printing the frame; at 160x48 that is about an eighth of one core.
+One glyph and two colours per cell come back for ratatui to print; a cell that
+changed too little to see keeps what it had, so the terminal isn't sent it
+again, and each frame goes out as one synchronized update. A GPU with Vulkan,
+Metal or DirectX 12 drivers is needed; a terminal too large for its buffers
+gets a message instead of a frame. Most of the CPU time goes to printing the
+frame; at 160x48 that is about a fifth of one core.
+
+The layout of the parameters the shaders read, and every option's number,
+come from the Rust side (`src/params.rs`, `src/shader.rs`), so the two can't
+drift apart.
 
 ## Credits
 
