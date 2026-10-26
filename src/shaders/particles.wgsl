@@ -435,3 +435,81 @@ fn life_move(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgrou
         hist_add(pos + vec2(f32(k % 2u), f32(k / 2u)), c);
     }
 }
+
+// ---------------------------------------------------------------- boids
+//
+// A flock: each boid steers toward its neighbours' middle, matches their
+// heading and keeps its distance (from the bins around it, so no boid visits
+// every other), while a home in the art draws the flock into the letters.
+// Every so often the pull lets go and the flock wheels away, then returns.
+
+@compute @workgroup_size(64)
+fn boid_bin(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
+    if i >= params[H_SWARM] { return; }
+    let b = state[params[H_PARTICLES] + i];
+    if b.x == 0.0 && b.y == 0.0 { return; }
+    let cell = bin_of(b.xy);
+    let o = bin_at(cell.x, cell.y) + BIN_BOIDS;
+    atomicAdd(&bins[o], 1u);
+    atomicAdd(&bins[o + 1u], bitcast<u32>(i32(clamp(b.z, -2000.0, 2000.0) * 16.0)));
+    atomicAdd(&bins[o + 2u], bitcast<u32>(i32(clamp(b.w, -2000.0, 2000.0) * 16.0)));
+    atomicAdd(&bins[o + 3u], u32(clamp(b.x, 0.0, width()) * 2.0));
+    atomicAdd(&bins[o + 4u], u32(clamp(b.y, 0.0, height()) * 2.0));
+}
+
+@compute @workgroup_size(64)
+fn boids(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
+    let homes = params[H_HOMES];
+    if i >= params[H_SWARM] || homes == 0u { return; }
+    let slot = params[H_PARTICLES] + i;
+    var b = state[slot];
+    let w = width();
+    let h = height();
+    if b.x == 0.0 && b.y == 0.0 {
+        let a = hash(i, 23u) * TAU;
+        b = vec4(hash(i, 21u) * w, hash(i, 22u) * h, cos(a) * 80.0, sin(a) * 80.0);
+    }
+    let s = params[H_SWARM_SCENE];
+    let home = point_now(H_IN_HOMES, i % homes, s);
+    var pos = b.xy;
+    var vel = b.zw;
+    let cell = bin_of(pos);
+    var count = 0.0;
+    var heading = vec2(0.0);
+    var centre = vec2(0.0);
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            if cell.x + dx < 0 || cell.y + dy < 0 || cell.x + dx >= i32(bins_w()) || cell.y + dy >= i32(bins_h()) { continue; }
+            let o = bin_at(cell.x + dx, cell.y + dy) + BIN_BOIDS;
+            let n = f32(atomicLoad(&bins[o]));
+            count += n;
+            heading += vec2(f32(bitcast<i32>(atomicLoad(&bins[o + 1u]))), f32(bitcast<i32>(atomicLoad(&bins[o + 2u])))) / 16.0;
+            centre += vec2(f32(atomicLoad(&bins[o + 3u])), f32(atomicLoad(&bins[o + 4u]))) / 2.0;
+        }
+    }
+    var force = vec2(0.0);
+    if count > 1.0 {
+        let middle = centre / count;
+        force += (middle - pos) * 0.9;
+        force += (heading / count - vel) * 1.6;
+        // Crowded: spread out.
+        force -= (middle - pos) * clamp((count - 30.0) / 40.0, 0.0, 2.0) * 2.5;
+    }
+    // Home, except while the flock is let go.
+    let free = smoothstep(0.55, 0.62, wrap(age(s) / 9.0)) * (1.0 - smoothstep(0.85, 0.95, wrap(age(s) / 9.0)));
+    force += (vec2(home.x, home.y) - pos) * 3.0 * (1.0 - free);
+    // Walls push back.
+    force += vec2(select(0.0, 400.0, pos.x < 20.0) - select(0.0, 400.0, pos.x > w - 20.0),
+        select(0.0, 400.0, pos.y < 20.0) - select(0.0, 400.0, pos.y > h - 20.0));
+    let delta = dt();
+    vel += force * delta;
+    let speed = length(vel);
+    vel *= clamp(speed, 40.0, 320.0) / max(speed, 1e-3);
+    pos += vel * delta;
+    state[slot] = vec4(pos, vel);
+    let c = lerp(ink_at(s, home.x, home.y, time()), WHITE, clamp(speed / 900.0, 0.0, 0.4));
+    let alpha = select(1.0, opacity(0u, pos.x, pos.y), s == H_FROM && kind() != K_STILL);
+    splat(pos.x, pos.y, 2.0, c, alpha);
+}

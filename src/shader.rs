@@ -84,6 +84,11 @@ fn prelude() -> String {
         put("S_", name, slot.at());
     }
     put("", "PieceLen", PIECE_LEN);
+    put(
+        "",
+        "Agents",
+        usize::try_from(crate::gpu::AGENTS).unwrap_or(0),
+    );
     let index = |code: u32| usize::try_from(code).unwrap_or(0);
     for (i, b) in BACKDROPS.iter().enumerate() {
         put("B_", &format!("{b:?}"), i);

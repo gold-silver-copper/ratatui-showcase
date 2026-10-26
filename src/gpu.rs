@@ -85,6 +85,8 @@ const FLAME_THREADS: u32 = 65_536;
 const FLAME_STEPS: u32 = 24;
 /// Particle life's particles: each feels every other, so few.
 const LIFE: u32 = 3072;
+/// Slime mold agents and crystal walkers.
+pub const AGENTS: u32 = 65_536;
 /// How much of the flame histogram survives a sixtieth of a second.
 const FLAME_FADE: f32 = 0.88;
 /// Bloom levels, each half the size of the one before.
@@ -245,7 +247,7 @@ fn jumps(extent: u32) -> Vec<Pass> {
 /// What a pass is part of, for timing.
 fn phase(p: &Pass) -> &'static str {
     match p.entry {
-        "clear" | "particles" | "swarm" => "particles",
+        "clear" | "particles" | "swarm" | "boid_bin" | "boids" => "particles",
         "splat_fade" | "flame" | "life_forces" | "life_move" => "flames",
         "bins_clear" => "particles",
         "field_cover" | "field_seed" | "field_jump" | "field_finish" => "fields",
@@ -263,6 +265,8 @@ fn all_passes() -> Vec<Pass> {
         "clear",
         "particles",
         "swarm",
+        "boid_bin",
+        "boids",
         "splat_fade",
         "flame",
         "bins_clear",
@@ -293,9 +297,17 @@ fn all_passes() -> Vec<Pass> {
     for entry in ["fluid_pressure", "reaction"] {
         passes.extend([flipped(entry, 0), flipped(entry, 1)]);
     }
-    for entry in ["life", "fire", "ripple"] {
+    for entry in [
+        "life",
+        "fire",
+        "ripple",
+        "slime_agents",
+        "slime_diffuse",
+        "crystal",
+    ] {
         passes.extend((0..MAX_TICKS).map(|k| numbered(entry, k)));
     }
+    passes.extend((0..MAX_TICKS * 2).map(|k| numbered("sand", k)));
     for level in 0..BLOOM_LEVELS {
         passes.extend([
             leveled("bloom_down", level, 0),
@@ -529,6 +541,7 @@ impl Layout {
             | Region::BgOld
             | Region::BgNew => grid,
             Region::Particles => SWARM,
+            Region::Agents => AGENTS,
             Region::Flame => FLAME_THREADS,
         };
         let mut regions = Vec::with_capacity(Region::ALL.len());
@@ -547,6 +560,14 @@ fn bin_words(cols: u16, rows: u16) -> usize {
     usize::from(cols.div_ceil(4))
         .saturating_mul(usize::from(rows.div_ceil(2)))
         .saturating_mul(17)
+}
+
+/// Sand works on 2 x 2 blocks of the grid, shifted by one every other
+/// step: a spare row and column of blocks for the shifted ones.
+fn sand_blocks(cols: u16, rows: u16) -> u32 {
+    u32::from(cols)
+        .saturating_add(1)
+        .saturating_mul(u32::from(rows).saturating_mul(2).saturating_add(1))
 }
 
 /// Bytes each buffer needs for `cells` cells: state, hist, frames, cover.
@@ -628,7 +649,7 @@ impl Gpu<'_, '_> {
             Some(mode) => Some((mode, TO, (from.id << 32 | to.id) | 1 << 63)),
             None => owner(|s| s.act.mode.simulates()).map(|(s, slot)| (s.act.mode, slot, s.id)),
         };
-        let swarm = owner(|s| s.act.mode == Mode::Swarm);
+        let swarm = owner(|s| s.act.mode.flocks());
         let splat = owner(|s| s.act.backdrop.splatted());
         self.upload_inputs(glyphs, from, to, crossing, swarm.map(|(s, _)| s));
         self.resize(cols, rows);
@@ -658,8 +679,11 @@ impl Gpu<'_, '_> {
             tracker.sim = id;
             let stepped =
                 |entry: &'static str, n: u32| (0..n).map(move |k| (flipped(entry, k % 2), grid));
+            let numbered_steps = |entry: &'static str, n: u32, threads: u32| {
+                (0..n).map(move |k| (numbered(entry, k), threads))
+            };
             match mode {
-                Mode::Fluid => {
+                Mode::Fluid | Mode::Ink => {
                     for _ in 0..ticks {
                         sims.extend(
                             [
@@ -679,27 +703,44 @@ impl Gpu<'_, '_> {
                     steps = ticks.saturating_mul(REACTION);
                     sims.extend(stepped("reaction", steps));
                 }
-                Mode::Life | Mode::Fire | Mode::Ripple => {
-                    let (entry, due) = match mode {
-                        Mode::Life => (
-                            "life",
-                            (tracker.ticks / LIFE_EVERY).saturating_sub(before / LIFE_EVERY),
-                        ),
-                        Mode::Fire => ("fire", u64::from(ticks)),
-                        Mode::Ripple
-                        | Mode::Fluid
-                        | Mode::Reaction
-                        | Mode::Flat
-                        | Mode::Turntable
-                        | Mode::Swarm => ("ripple", u64::from(ticks)),
-                    };
+                Mode::Life => {
+                    let due = (tracker.ticks / LIFE_EVERY).saturating_sub(before / LIFE_EVERY);
                     steps = u32::try_from(due)
                         .unwrap_or(0)
                         .max(u32::from(fresh))
                         .min(MAX_TICKS);
-                    sims.extend((0..steps).map(|k| (numbered(entry, k), grid)));
+                    sims.extend(numbered_steps("life", steps, grid));
                 }
-                Mode::Flat | Mode::Turntable | Mode::Swarm => {}
+                Mode::Fire => {
+                    steps = ticks.min(MAX_TICKS);
+                    sims.extend(numbered_steps("fire", steps, grid));
+                }
+                Mode::Ripple => {
+                    steps = ticks.min(MAX_TICKS);
+                    sims.extend(numbered_steps("ripple", steps, grid));
+                }
+                Mode::Slime => {
+                    // Each step: the agents move and leave trails, then the
+                    // trails spread and fade.
+                    steps = ticks.min(MAX_TICKS);
+                    for k in 0..steps {
+                        sims.extend([
+                            (numbered("slime_agents", k), AGENTS),
+                            (numbered("slime_diffuse", k), grid),
+                        ]);
+                    }
+                }
+                Mode::Sand => {
+                    // Two steps a tick, each on 2 x 2 blocks of the grid.
+                    steps = ticks.saturating_mul(2).min(MAX_TICKS * 2);
+                    sims.extend(numbered_steps("sand", steps, sand_blocks(cols, rows)));
+                }
+                Mode::Crystal => {
+                    steps = ticks.min(MAX_TICKS);
+                    // Its threads also reset the crystal grid.
+                    sims.extend(numbered_steps("crystal", steps, AGENTS.max(grid)));
+                }
+                Mode::Flat | Mode::Turntable | Mode::Swarm | Mode::Boids => {}
             }
         }
 
@@ -792,8 +833,14 @@ impl Gpu<'_, '_> {
         if particles > 0 {
             passes.push((pass("particles"), particles));
         }
-        if swarm.is_some() {
-            passes.push((pass("swarm"), SWARM));
+        match swarm {
+            Some((s, _)) if s.act.mode == Mode::Boids => passes.extend([
+                (pass("bins_clear"), num::u32_of(bin_words(cols, rows))),
+                (pass("boid_bin"), SWARM),
+                (pass("boids"), SWARM),
+            ]),
+            Some(_) => passes.push((pass("swarm"), SWARM)),
+            None => {}
         }
         let living = splat.is_some_and(|(s, _)| s.act.backdrop == Backdrop::ParticleLife);
         if living {

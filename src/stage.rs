@@ -155,6 +155,16 @@ pub enum Mode {
     Ripple,
     /// A swarm of particles.
     Swarm,
+    /// Slime mold: agents follow each other's trails into the letters.
+    Slime,
+    /// A flock that gathers into the letters.
+    Boids,
+    /// The letters crumble into falling sand.
+    Sand,
+    /// Crystals branch out until they fill the letters.
+    Crystal,
+    /// Ink rising from the letters and curling through water.
+    Ink,
 }
 
 pub const MODES: &[Mode] = &[
@@ -170,6 +180,11 @@ pub const MODES: &[Mode] = &[
     Mode::Fire,
     Mode::Ripple,
     Mode::Swarm,
+    Mode::Slime,
+    Mode::Boids,
+    Mode::Sand,
+    Mode::Crystal,
+    Mode::Ink,
 ];
 
 impl Mode {
@@ -183,17 +198,35 @@ impl Mode {
         Mode::Fire,
         Mode::Ripple,
         Mode::Swarm,
+        Mode::Slime,
+        Mode::Boids,
+        Mode::Sand,
+        Mode::Crystal,
+        Mode::Ink,
     ];
 
     pub fn code(self) -> u32 {
         code(Self::ALL, self)
     }
 
+    /// Whether the mode flies particles around the art (in `Region::Particles`).
+    pub fn flocks(self) -> bool {
+        matches!(self, Mode::Swarm | Mode::Boids)
+    }
+
     /// Whether the mode runs a simulation on the grid.
     pub fn simulates(self) -> bool {
         match self {
-            Mode::Fluid | Mode::Reaction | Mode::Life | Mode::Fire | Mode::Ripple => true,
-            Mode::Flat | Mode::Turntable | Mode::Swarm => false,
+            Mode::Fluid
+            | Mode::Reaction
+            | Mode::Life
+            | Mode::Fire
+            | Mode::Ripple
+            | Mode::Slime
+            | Mode::Sand
+            | Mode::Crystal
+            | Mode::Ink => true,
+            Mode::Flat | Mode::Turntable | Mode::Swarm | Mode::Boids => false,
         }
     }
 
@@ -207,6 +240,11 @@ impl Mode {
             Mode::Fire => "fire",
             Mode::Ripple => "water",
             Mode::Swarm => "swarm",
+            Mode::Slime => "slime mold",
+            Mode::Boids => "boids",
+            Mode::Sand => "sand",
+            Mode::Crystal => "crystal",
+            Mode::Ink => "ink",
         }
     }
 }
