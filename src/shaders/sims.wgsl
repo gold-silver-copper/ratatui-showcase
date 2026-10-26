@@ -41,17 +41,44 @@ fn fluid_advect(@builtin(global_invocation_id) id: vec3<u32>) {
     var velocity = grid_sample(H_SIM0, back).xy * 0.994;
     var dye = grid_sample(H_SIM2, back).rgb * 0.982;
     // Eddies: the curl of drifting noise, which swirls without pushing the
-    // dye anywhere in particular. The music stirs harder.
+    // dye anywhere in particular.
     let q = p * 0.025 + vec2(t * 0.07, -t * 0.05);
     let e = 0.5;
     let dx = fbm(q + vec2(e, 0.0)) - fbm(q - vec2(e, 0.0));
     let dy = fbm(q + vec2(0.0, e)) - fbm(q - vec2(0.0, e));
-    velocity += vec2(dy, -dx) * (240.0 + bass() * 900.0) * dt();
+    velocity += vec2(dy, -dx) * 240.0 * dt();
     if inside_new(p) {
         dye = mix(dye, ink_at(H_TO, p.x, p.y, t) * 0.85, 0.1);
     }
     state[at(H_SIM1, i)] = vec4(velocity, 0.0, 0.0);
     state[at(H_SIM3, i)] = vec4(dye, 1.0);
+}
+
+/// The fluid's spin at each point, for vorticity confinement.
+@compute @workgroup_size(64)
+fn fluid_curl(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if i >= grid_w() * grid_h() { return; }
+    let gx = i32(i % grid_w());
+    let gy = i32(i / grid_w());
+    let n = neighbours(H_SIM1, gx, gy);
+    state[at(H_SIM0, i)] = vec4(0.5 * ((n[1].y - n[0].y) - (n[3].x - n[2].x)), 0.0, 0.0, 0.0);
+}
+
+/// Vorticity confinement: pushes along the spin's gradient, putting back the
+/// small eddies that the coarse grid smears away.
+@compute @workgroup_size(64)
+fn fluid_vorticity(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if i >= grid_w() * grid_h() { return; }
+    let gx = i32(i % grid_w());
+    let gy = i32(i / grid_w());
+    let n = neighbours(H_SIM0, gx, gy);
+    let spin = state[at(H_SIM0, i)].x;
+    let gradient = vec2(abs(n[1].x) - abs(n[0].x), abs(n[3].x) - abs(n[2].x));
+    let towards = gradient / max(length(gradient), 1e-5);
+    let force = vec2(towards.y, -towards.x) * spin * 6.0;
+    state[at(H_SIM1, i)] = vec4(state[at(H_SIM1, i)].xy + force * dt(), 0.0, 0.0);
 }
 
 @compute @workgroup_size(64)
@@ -121,9 +148,13 @@ fn reaction(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var k = 0; k < 4; k++) { lap += n[k].xy * 0.2; }
     lap += (grid_load(src, gx - 1, gy - 1).xy + grid_load(src, gx + 1, gy - 1).xy + grid_load(src, gx - 1, gy + 1).xy
         + grid_load(src, gx + 1, gy + 1).xy) * 0.05;
-    // Coral grows inside the letters and dies away outside them.
-    let feed = select(0.02, 0.0545, inside);
-    let kill = select(0.08, 0.062, inside);
+    // A pattern grows inside the letters and dies away outside them: coral,
+    // mitosis, worms, a maze or spots, by the scene's variant.
+    let presets = array<vec2<f32>, 5>(vec2(0.0545, 0.062), vec2(0.0367, 0.0649), vec2(0.078, 0.061), vec2(0.029, 0.057),
+        vec2(0.035, 0.065));
+    let preset = presets[variant(H_TO) % 5u];
+    let feed = select(0.02, preset.x, inside);
+    let kill = select(0.08, preset.y, inside);
     let uvv = c.x * c.y * c.y;
     var u = c.x + (1.0 * lap.x - uvv + feed * (1.0 - c.x));
     var v = c.y + (0.5 * lap.y + uvv - (feed + kill) * c.y);
@@ -177,16 +208,19 @@ fn fire(@builtin(global_invocation_id) id: vec3<u32>) {
     let gx = i32(i % grid_w());
     let gy = i32(i / grid_w());
     let r = hash3(i, frame(), 3u);
+    let drift = i32(floor(r * 3.0)) - 1;
+    let below = grid_load(src, gx + drift, gy + 1);
     var heat: f32;
     if inside_new(p) {
-        heat = 0.8 + 0.2 * r + bass() * 0.3;
+        heat = 0.8 + 0.2 * r;
     } else if gy == i32(grid_h()) - 1 {
         heat = 0.45 * r;
     } else {
-        let drift = i32(floor(r * 3.0)) - 1;
-        heat = grid_load(src, gx + drift, gy + 1).x - (0.008 + r * 0.03);
+        heat = below.x - (0.008 + r * 0.03);
     }
-    state[at(dst, i)] = vec4(max(heat, 0.0), 0.0, 0.0, 0.0);
+    // Smoke: what the flames lose rises on, slowly thinning.
+    let smoke = below.y * 0.975 + max(below.x - max(heat, 0.0), 0.0) * 0.35;
+    state[at(dst, i)] = vec4(max(heat, 0.0), clamp(smoke, 0.0, 1.0), 0.0, 0.0);
 }
 
 // ---------------------------------------------------------------- ripples
@@ -204,9 +238,9 @@ fn ripple(@builtin(global_invocation_id) id: vec3<u32>) {
     let n = neighbours(src, gx, gy);
     let lap = n[0].x + n[1].x + n[2].x + n[3].x - 4.0 * here.x;
     var h = (2.0 * here.x - here.y + 0.25 * lap) * 0.996;
-    // Rain: a few drops each second, more with the music.
+    // Rain: a few drops each second.
     let drop = hash3(u32(gx / 4), u32(gy / 4) * 7919u, frame());
-    if drop < 0.000008 + bass() * 0.0001 { h += 8.0; }
+    if drop < 0.000008 { h += 8.0; }
     state[at(dst, i)] = vec4(h, here.x, 0.0, 0.0);
 }
 
@@ -222,7 +256,7 @@ fn fire_color(s: u32, heat: f32) -> vec3<f32> {
 
 /// The new scene drawn by its simulation at `(x, y)`, over `base`.
 fn sim_art(s: u32, x: f32, y: f32, t: f32, row: u32) -> Art {
-    var out = Art(vec3(0.0), 0.0, vec3(0.0), 0.0);
+    var out = Art(vec3(0.0), 0.0, vec3(0.0), 0.0, 0.0);
     let p = vec2(x, y);
     switch mode(s) {
         case 2u: {
@@ -245,11 +279,15 @@ fn sim_art(s: u32, x: f32, y: f32, t: f32, row: u32) -> Art {
             out.color = select(ink * 0.7, lerp(ink, WHITE, 0.2), cell.x > 0.5);
         }
         case 5u: {
-            let heat = grid_sample(sim_latest(), p).x;
+            let cell = grid_sample(sim_latest(), p);
+            let heat = cell.x;
+            let smoke = clamp(cell.y * 1.3, 0.0, 0.8) * (1.0 - clamp(heat * 2.0, 0.0, 1.0));
             let a = art(s, 1u, x, y, t, row);
-            out.alpha = max(clamp(heat * 1.8, 0.0, 1.0), a.alpha);
+            let flame = clamp(heat * 1.8, 0.0, 1.0);
+            out.alpha = max(max(flame, smoke), a.alpha);
             let ember = mixl(background(s) * 0.5, a.color * 0.35, 0.6);
-            out.color = select(fire_color(s, heat), ember, a.alpha > 0.5);
+            let fumes = mixl(background(s) * 2.5, vec3(0.35), 0.5);
+            out.color = select(select(fumes, fire_color(s, heat), flame >= smoke), ember, a.alpha > 0.5);
             out.glow = fire_color(s, heat) * heat * 0.25;
         }
         default: {}

@@ -226,6 +226,21 @@ pub enum Idle {
     Wave,
     Breathe,
     Sway,
+    /// Letters hop one after another.
+    Bounce,
+}
+
+impl Idle {
+    pub fn name(self) -> &'static str {
+        match self {
+            Idle::Still => "still",
+            Idle::Float => "float",
+            Idle::Wave => "wave",
+            Idle::Breathe => "breathe",
+            Idle::Sway => "sway",
+            Idle::Bounce => "bounce",
+        }
+    }
 }
 
 pub const IDLES: &[Idle] = &[
@@ -234,6 +249,7 @@ pub const IDLES: &[Idle] = &[
     Idle::Wave,
     Idle::Breathe,
     Idle::Sway,
+    Idle::Bounce,
 ];
 
 /// Everything that makes one scene look the way it does.
@@ -248,6 +264,8 @@ pub struct Act {
     pub idle: Idle,
     pub mode: Mode,
     pub post: Post,
+    /// Picks among a mode's or background's presets.
+    pub variant: u32,
 }
 
 impl Act {
@@ -316,7 +334,8 @@ impl Piece {
         let (mut lx, mut ly) = (x - self.x, y - self.y);
         let (cx, cy) = (self.width() / 2.0, self.height() / 2.0);
         match idle {
-            Idle::Still => {}
+            // Letters hop only on the GPU; the CPU samples the art at rest.
+            Idle::Still | Idle::Bounce => {}
             Idle::Float => ly -= amplitude * (t * 0.9).sin(),
             Idle::Wave => {
                 ly -= amplitude * (lx / self.width().max(1.0) * TAU * 0.9 - t * 2.2).sin()
@@ -338,6 +357,23 @@ impl Piece {
 }
 
 /// Which cells hold part of the art, for effects that treat it specially.
+/// Which letter each column of `bitmap` belongs to: letters are runs of
+/// columns with ink, split by empty ones.
+fn letters(bitmap: &Bitmap) -> Vec<u8> {
+    let mut letter = 0_u8;
+    let mut inside = false;
+    (0..bitmap.width)
+        .map(|x| {
+            let ink = (0..bitmap.height).any(|y| bitmap.get(x, y).ink > 0.5);
+            if ink && !inside {
+                letter = letter.wrapping_add(1);
+            }
+            inside = ink;
+            letter
+        })
+        .collect()
+}
+
 /// Words in a scene's settings block for the GPU.
 pub const BLOCK: usize = 64;
 const MAX_PIECES: usize = 2;
@@ -519,12 +555,14 @@ impl Stage {
     }
 
     /// The art for the GPU: each piece's pixels in turn, with ink in bits
-    /// 0-7, material in 8-15 and its parameter in 16-23.
+    /// 0-7, material in 8-15, its parameter in 16-23 and which letter the
+    /// column belongs to in 24-31.
     pub fn texels(&self) -> Vec<u32> {
         let mut texels = Vec::with_capacity(self.texels_len());
         for piece in &self.pieces {
+            let letters = letters(&piece.bitmap);
             for y in 0..piece.bitmap.height {
-                for x in 0..piece.bitmap.width {
+                for (x, &letter) in (0..piece.bitmap.width).zip(&letters) {
                     let px = piece.bitmap.get(x, y);
                     let (material, param) = match px.material {
                         Material::Ink => (0, 0),
@@ -537,7 +575,9 @@ impl Stage {
                         Material::Reflection(f) => (7, f),
                     };
                     let ink = u32::from(num::round_u8(px.ink * 255.0));
-                    texels.push(ink | material << 8 | u32::from(param) << 16);
+                    texels.push(
+                        ink | material << 8 | u32::from(param) << 16 | u32::from(letter) << 24,
+                    );
                 }
             }
         }
@@ -594,6 +634,7 @@ impl Stage {
             .max()
             .unwrap_or(0);
         put(29, age.to_bits());
+        put(48, self.act.variant);
         put(30, num::float((tallest / 14).clamp(2, 24)).to_bits());
         put(
             31,
@@ -649,6 +690,7 @@ mod tests {
             idle: Idle::Still,
             mode: Mode::Flat,
             post: Post::Clean,
+            variant: 0,
         }
     }
 

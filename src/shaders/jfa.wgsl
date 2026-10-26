@@ -1,7 +1,8 @@
 // Distance fields by jump flooding, every frame, on the grid. Each grid
 // point keeps the nearest edge point of the old scene's art (xy) and the new
 // one's (zw); -1 means none found yet. Seeding writes FIELD0, and twelve
-// jumps (2048 down to 1) ping-pong so the result lands back in FIELD0.
+// jumps (2048 down to 1) ping-pong so the result lands back in FIELD0;
+// finishing turns it into signed distances in FIELD1.
 
 fn grid_centre(gx: u32, gy: u32) -> vec2<f32> { return vec2(f32(gx) * 2.0 + 1.0, f32(gy) * 2.0 + 1.0); }
 
@@ -50,4 +51,24 @@ fn field_jump(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     state[params[dst] + i] = best;
+}
+
+/// Turns the nearest edge points into signed distances (old scene in x, new
+/// in y), so every later lookup is one bilinear read.
+@compute @workgroup_size(64)
+fn field_finish(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if i >= grid_w() * grid_h() { return; }
+    let p = grid_centre(i % grid_w(), i / grid_w());
+    let seeds = state[params[H_FIELD0] + i];
+    var d = vec2(FAR);
+    if seeds.x >= 0.0 {
+        let inside = layer_coverage(0u, p.x, p.y) > 0.5;
+        d.x = select(1.0, -1.0, inside) * distance(p, seeds.xy);
+    }
+    if seeds.z >= 0.0 {
+        let inside = layer_coverage(1u, p.x, p.y) > 0.5;
+        d.y = select(1.0, -1.0, inside) * distance(p, seeds.zw);
+    }
+    state[params[H_FIELD1] + i] = vec4(d, 0.0, 0.0);
 }

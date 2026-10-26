@@ -2,8 +2,9 @@
 // must match), and small helpers.
 //
 // Positions are in samples: each terminal cell is 4 x 8 of them. Images in
-// `state` are one vec4 per sample; simulations and distance fields run on a
-// grid of 2 x 2 samples per cell ("grid"); bloom on 4 x 4.
+// `state` are one vec4 per sample; simulations, distance fields and
+// backgrounds run on a grid of 2 x 2 samples ("grid"); bloom on 4 x 4 and
+// coarser.
 
 @group(0) @binding(0) var<storage, read> params: array<u32>;
 @group(0) @binding(1) var<storage, read> inputs: array<u32>;
@@ -11,6 +12,8 @@
 @group(0) @binding(3) var<storage, read_write> output: array<u32>;
 @group(0) @binding(4) var<storage, read_write> cover: array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read_write> color: array<atomic<u32>>;
+// Flames and attractors: hits and summed colour index per sample.
+@group(0) @binding(6) var<storage, read_write> hist: array<atomic<u32>>;
 
 // Pipeline constants: jump size for distance fields, and which of two
 // buffers a ping-pong pass reads.
@@ -46,6 +49,12 @@ const H_SIM1: u32 = 24u;
 const H_SIM2: u32 = 25u;
 const H_SIM3: u32 = 26u;
 const H_PARTICLES: u32 = 27u;
+const H_BG_OLD: u32 = 28u;
+const H_BG_NEW: u32 = 29u;
+const H_BLOOM2: u32 = 30u;
+const H_BLOOM3: u32 = 31u;
+const H_BLOOM4: u32 = 32u;
+const H_BLOOM5: u32 = 33u;
 const H_IN_GLYPHS: u32 = 34u;
 const H_IN_ASCII: u32 = 35u;
 const H_ASCII_COUNT: u32 = 36u;
@@ -53,12 +62,13 @@ const H_IN_POINTS: u32 = 37u;
 const H_IN_HOMES: u32 = 38u;
 const H_HOMES: u32 = 39u;
 const H_IN_ART: u32 = 40u;
+const H_IN_ORBIT: u32 = 41u;
 const H_SIM_LATEST: u32 = 42u;
 const H_SIM_RESET: u32 = 43u;
-const H_LEVEL: u32 = 44u;
-const H_BASS: u32 = 45u;
-const H_MID: u32 = 46u;
-const H_TREBLE: u32 = 47u;
+const H_ORBIT_LEN: u32 = 44u;
+const H_FLAME: u32 = 45u;
+const H_FLAME_THREADS: u32 = 46u;
+const H_FLAME_STEPS: u32 = 47u;
 const H_FROM: u32 = 64u;
 const H_TO: u32 = 128u;
 
@@ -78,6 +88,7 @@ const S_AGE: u32 = 29u;
 const S_WIDTH: u32 = 30u;
 const S_GLOW: u32 = 31u;
 const S_PIECE0: u32 = 32u;
+const S_VARIANT: u32 = 48u;
 const PIECE_LEN: u32 = 8u;
 
 // Modes: how a scene draws its art.
@@ -129,9 +140,6 @@ fn progress() -> f32 { return pf(H_PROGRESS); }
 fn kind() -> u32 { return params[H_KIND]; }
 fn frame() -> u32 { return params[H_FRAME]; }
 fn dt() -> f32 { return clamp(pf(H_DT), 0.001, 0.05); }
-fn level() -> f32 { return pf(H_LEVEL); }
-fn bass() -> f32 { return pf(H_BASS); }
-fn treble() -> f32 { return pf(H_TREBLE); }
 
 /// Image size in samples.
 fn img_w() -> u32 { return params[H_COLS] * COLS; }
@@ -143,11 +151,12 @@ fn height() -> f32 { return f32(img_h()); }
 fn grid_w() -> u32 { return params[H_COLS] * 2u; }
 fn grid_h() -> u32 { return params[H_ROWS] * 4u; }
 
-/// Bloom size: 4 x 4 samples per bloom point.
-fn bloom_w() -> u32 { return params[H_COLS]; }
-fn bloom_h() -> u32 { return params[H_ROWS] * 2u; }
+/// Bloom size at `level`: 4 x 4 samples per point at level 0, halving after.
+fn bloom_w(level: u32) -> u32 { return max(params[H_COLS] >> level, 1u); }
+fn bloom_h(level: u32) -> u32 { return max((params[H_ROWS] * 2u) >> level, 1u); }
 
 fn mode(s: u32) -> u32 { return params[s + S_MODE]; }
+fn variant(s: u32) -> u32 { return params[s + S_VARIANT]; }
 fn style(s: u32) -> u32 { return params[s + S_STYLE]; }
 fn age(s: u32) -> f32 { return pf(s + S_AGE); }
 
@@ -255,8 +264,8 @@ fn grid_sample(base: u32, p: vec2<f32>) -> vec4<f32> {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-fn bloom_load(base: u32, x: i32, y: i32) -> vec4<f32> {
-    let bx = u32(clamp(x, 0, i32(bloom_w()) - 1));
-    let by = u32(clamp(y, 0, i32(bloom_h()) - 1));
-    return state[params[base] + by * bloom_w() + bx];
+fn bloom_load(base: u32, level: u32, x: i32, y: i32) -> vec4<f32> {
+    let bx = u32(clamp(x, 0, i32(bloom_w(level)) - 1));
+    let by = u32(clamp(y, 0, i32(bloom_h(level)) - 1));
+    return state[params[base] + by * bloom_w(level) + bx];
 }

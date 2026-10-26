@@ -41,6 +41,25 @@ pub fn round_u8(v: f32) -> u8 {
     u8::try_from(floor_u32(v + 0.5)).unwrap_or(u8::MAX)
 }
 
+/// `v` as an `f32`, its mantissa cut to fit; tiny values become 0 and huge
+/// ones infinity.
+pub fn narrow(v: f64) -> f32 {
+    let bits = v.to_bits();
+    let sign = u32::from(bits >> 63 == 1) << 31;
+    let exponent = i64::try_from((bits >> 52) & 0x7ff)
+        .unwrap_or(0)
+        .saturating_sub(1023);
+    if v == 0.0 || exponent < -126 {
+        return f32::from_bits(sign);
+    }
+    if exponent > 127 || !v.is_finite() {
+        return f32::from_bits(sign | 0x7f80_0000);
+    }
+    let mantissa = u32::try_from((bits >> 29) & 0x7f_ffff).unwrap_or(0);
+    let biased = u32::try_from(exponent.saturating_add(127)).unwrap_or(0);
+    f32::from_bits(sign | biased << 23 | mantissa)
+}
+
 /// `n` as an `f32`, rounding to the nearest representable value.
 pub fn float(n: usize) -> f32 {
     let n = u32::try_from(n).unwrap_or(u32::MAX);
@@ -89,6 +108,21 @@ mod tests {
         assert_eq!(floor_u32(f32::INFINITY), u32::MAX);
         assert_eq!(round_u8(300.0), 255);
         assert_eq!(round_u8(127.5), 128);
+    }
+
+    #[test]
+    fn narrowing_keeps_values() {
+        for v in [
+            1.0,
+            -0.5,
+            0.131_825_904_205_311_97,
+            -0.743_643_887_037_158_7,
+            3.0e-20,
+            0.0,
+        ] {
+            assert!((f64::from(narrow(v)) - v).abs() <= v.abs() * 1e-6, "{v}");
+        }
+        assert_eq!(narrow(1e300), f32::INFINITY);
     }
 
     #[test]

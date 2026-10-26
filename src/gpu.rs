@@ -5,18 +5,23 @@
 //!
 //! Buffers:
 //! - params: the frame, both scenes and the transition (every frame)
-//! - inputs: glyph tables, both scenes' art, particle and swarm positions
-//!   (when they change)
-//! - state: images, distance fields, simulations and swarm particles; it
-//!   lives on the GPU between frames
+//! - inputs: glyph tables, the Mandelbrot reference orbit, both scenes' art,
+//!   particle and swarm positions (when they change)
+//! - state: images, backgrounds, distance fields, bloom, simulations, swarm
+//!   particles and flame points; it lives on the GPU between frames
 //! - output: `[cols, rows]` then a glyph, foreground and background per cell
 //! - cover, color: scratch where particles are splatted
+//! - hist: hit counts of flames and attractors, fading frame to frame
+//!
+//! With `--profile`, each phase is timed on the GPU and shown in the caption.
 
 use std::collections::HashMap;
 
 use bevy::asset::{RenderAssetUsages, uuid_handle};
+
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::render_asset::RenderAssets;
@@ -36,8 +41,10 @@ use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::shader::Shader;
 
+use crate::backdrop;
 use crate::glyphs::Glyphs;
 use crate::num;
+use crate::profile::{self, Queries, Timings};
 use crate::shader::{self, Watch};
 use crate::stage::{Mode, Stage};
 use crate::transition::{self, Crossing};
@@ -54,9 +61,15 @@ const JUMPS: u32 = 12;
 const PRESSURE: u32 = 20;
 /// Reaction-diffusion steps per frame.
 const REACTION: u32 = 12;
+/// Flame and attractor points, and the steps each takes per frame.
+const FLAME_THREADS: u32 = 65_536;
+const FLAME_STEPS: u32 = 24;
+/// Bloom levels, each half the size of the one before.
+const BLOOM_LEVELS: u32 = 3;
 
 pub struct GpuPlugin {
     pub watch: bool,
+    pub profile: bool,
 }
 
 impl Plugin for GpuPlugin {
@@ -67,9 +80,19 @@ impl Plugin for GpuPlugin {
         if self.watch {
             app.insert_resource(Watch::new()).add_systems(Update, watch);
         }
+        let timings = Timings::default();
+        if self.profile {
+            app.insert_resource(timings.clone())
+                .add_systems(Update, show_profile);
+        }
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
+        if self.profile {
+            render_app
+                .insert_resource(timings)
+                .add_systems(RenderStartup, init_queries);
+        }
         render_app
             .add_systems(RenderStartup, init_pipelines)
             .add_systems(
@@ -81,17 +104,19 @@ impl Plugin for GpuPlugin {
                 (
                     dispatch.in_set(RenderGraphSystems::Render),
                     submit.in_set(RenderGraphSystems::Submit),
+                    collect_timings.in_set(RenderGraphSystems::Finish),
                 ),
             );
     }
 }
 
-/// The latest frame read back from the GPU, and the shader's last error when
-/// watching for edits.
+/// The latest frame read back from the GPU; the shader's last error when
+/// watching for edits; GPU time per phase when profiling.
 #[derive(Resource, Default)]
 pub struct GpuFrame {
     pub data: Vec<u32>,
     pub shader_error: Option<String>,
+    pub profile: Option<String>,
 }
 
 impl GpuFrame {
@@ -127,6 +152,14 @@ const fn flipped(entry: &'static str, flip: u32) -> Pass {
     }
 }
 
+const fn leveled(entry: &'static str, level: u32, flip: u32) -> Pass {
+    Pass {
+        entry,
+        step: level,
+        flip,
+    }
+}
+
 /// Jump `k` of the distance field: a jump of 2^k. Jumps run from the
 /// largest down, each reading the buffer the previous one wrote.
 fn jump(k: u32) -> Pass {
@@ -138,20 +171,38 @@ fn jump(k: u32) -> Pass {
     }
 }
 
+/// What a pass is part of, for timing.
+fn phase(p: &Pass) -> &'static str {
+    match p.entry {
+        "clear" | "particles" | "swarm" => "particles",
+        "splat_fade" | "flame" => "flames",
+        "field_seed" | "field_jump" | "field_finish" => "fields",
+        "backdrops" => "backdrops",
+        "scene" => "scene",
+        "bloom_down" | "bloom_blur" => "bloom",
+        "post" => "post",
+        "encode" => "encode",
+        _ => "sims",
+    }
+}
+
 fn all_passes() -> Vec<Pass> {
     let mut passes: Vec<Pass> = [
         "clear",
         "particles",
         "swarm",
+        "splat_fade",
+        "flame",
         "field_seed",
+        "field_finish",
+        "backdrops",
         "fluid_advect",
+        "fluid_curl",
+        "fluid_vorticity",
         "fluid_divergence",
         "fluid_project",
         "fluid_copy",
         "scene",
-        "bloom_down",
-        "bloom_horizontal",
-        "bloom_vertical",
         "post",
         "encode",
     ]
@@ -161,6 +212,13 @@ fn all_passes() -> Vec<Pass> {
     passes.extend((0..JUMPS).map(jump));
     for entry in ["fluid_pressure", "reaction", "life", "fire", "ripple"] {
         passes.extend([flipped(entry, 0), flipped(entry, 1)]);
+    }
+    for level in 0..BLOOM_LEVELS {
+        passes.extend([
+            leveled("bloom_down", level, 0),
+            leveled("bloom_blur", level, 0),
+            leveled("bloom_blur", level, 1),
+        ]);
     }
     passes
 }
@@ -174,6 +232,7 @@ struct Job {
     output: Handle<ShaderBuffer>,
     cover: Handle<ShaderBuffer>,
     color: Handle<ShaderBuffer>,
+    hist: Handle<ShaderBuffer>,
     /// Size of the state buffer in vec4s.
     state: u64,
     passes: Vec<(Pass, u32)>,
@@ -187,6 +246,7 @@ pub struct Tracker {
     inputs: Option<(u64, u64, bool, u64)>,
     offsets: Inputs,
     homes: (u64, Vec<u32>),
+    orbit: Vec<u32>,
     born: Vec<(u64, f32)>,
     frame: u32,
     last_to: u64,
@@ -198,6 +258,8 @@ pub struct Tracker {
 #[derive(Default, Clone, Copy)]
 struct Inputs {
     ascii: u32,
+    orbit: u32,
+    orbit_len: u32,
     art: u32,
     points: u32,
     homes: u32,
@@ -213,21 +275,11 @@ pub struct Gpu<'w, 's> {
     commands: Commands<'w, 's>,
 }
 
-/// The microphone's loudness and bands, 0 when silent or off.
-#[derive(Clone, Copy, Default)]
-pub struct Sound {
-    pub level: f32,
-    pub bass: f32,
-    pub mid: f32,
-    pub treble: f32,
-}
-
 /// What applies to the whole frame.
 #[derive(Clone, Copy)]
 pub struct Frame {
     pub t: f32,
     pub dt: f32,
-    pub sound: Sound,
     pub dither: bool,
 }
 
@@ -253,6 +305,7 @@ fn setup(
         output: add(),
         cover: add(),
         color: add(),
+        hist: add(),
         state: 1,
         passes: Vec::new(),
     };
@@ -278,24 +331,89 @@ fn watch(
     }
 }
 
-/// Where each region of the state buffer starts, in vec4s: the scene image,
-/// two final images (this frame's and the last), two bloom buffers, two
-/// distance-field buffers, four simulation buffers and the swarm.
+/// GPU milliseconds per phase, for the caption.
+fn show_profile(timings: Res<Timings>, mut frame: ResMut<GpuFrame>) {
+    let mut phases = timings
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let total: f64 = phases.iter().map(|(_, ms)| ms).sum();
+    phases.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let parts: Vec<String> = phases
+        .iter()
+        .take(7)
+        .map(|(name, ms)| format!("{name} {ms:.2}"))
+        .collect();
+    frame.profile = Some(if phases.is_empty() {
+        "gpu timing: waiting (or no timestamp support)".to_owned()
+    } else {
+        format!("gpu {total:.2} ms: {}", parts.join(", "))
+    });
+}
+
+fn init_queries(
+    mut commands: Commands,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+    timings: Res<Timings>,
+) {
+    if let Some(queries) = Queries::new(&device, &queue, timings.clone()) {
+        commands.insert_resource(queries);
+    }
+}
+
+fn collect_timings(queries: Option<ResMut<Queries>>) {
+    if let Some(mut queries) = queries {
+        queries.collect();
+    }
+}
+
+/// Where each region of the state buffer starts, in vec4s.
 struct Layout {
-    regions: [u32; 12],
+    regions: [u32; REGIONS],
     total: u64,
 }
 
+/// Regions: scene image, two final images (this frame's and the last), bloom
+/// level 0 (two), two distance-field buffers, four simulation buffers, the
+/// swarm, old and new backgrounds, bloom levels 1 and 2 (two each), flames.
+const REGIONS: usize = 19;
+
 impl Layout {
     fn new(cols: u16, rows: u16) -> Self {
-        let cells = u32::from(cols).saturating_mul(u32::from(rows));
+        let (c, r) = (u32::from(cols), u32::from(rows));
+        let cells = c.saturating_mul(r);
         let image = cells.saturating_mul(32);
         let grid = cells.saturating_mul(8);
-        let bloom = cells.saturating_mul(2);
+        let level = |l: u32| {
+            (c >> l)
+                .max(1)
+                .saturating_mul((r.saturating_mul(2) >> l).max(1))
+        };
+        let (b0, b1, b2) = (level(0), level(1), level(2));
         let sizes = [
-            image, image, image, bloom, bloom, grid, grid, grid, grid, grid, grid, SWARM,
+            image,
+            image,
+            image,
+            b0,
+            b0,
+            grid,
+            grid,
+            grid,
+            grid,
+            grid,
+            grid,
+            SWARM,
+            grid,
+            grid,
+            b1,
+            b1,
+            b2,
+            b2,
+            FLAME_THREADS,
         ];
-        let mut regions = [0; 12];
+        let mut regions = [0; REGIONS];
         let mut at = 0_u32;
         for (slot, size) in regions.iter_mut().zip(sizes) {
             *slot = at;
@@ -337,6 +455,8 @@ impl Gpu<'_, '_> {
     ) {
         let from = crossing.map_or(to, |c| &c.from);
         let swarm = to.act.mode == Mode::Swarm;
+        let flames =
+            to.act.backdrop.splatted() || (crossing.is_some() && from.act.backdrop.splatted());
         self.upload_inputs(glyphs, from, to, crossing, swarm);
         let (cols, rows) = (to.cols, to.rows);
         let cells = usize::from(cols).saturating_mul(usize::from(rows));
@@ -351,7 +471,8 @@ impl Gpu<'_, '_> {
         let reset = tracker.last_to != to.id;
         tracker.last_to = to.id;
         let layout = Layout::new(cols, rows);
-        let (current, previous) = if tracker.frame.is_multiple_of(2) {
+        let even = tracker.frame.is_multiple_of(2);
+        let (current, previous) = if even {
             (layout.region(1), layout.region(2))
         } else {
             (layout.region(2), layout.region(1))
@@ -363,10 +484,15 @@ impl Gpu<'_, '_> {
         let mut latest = 0;
         match to.act.mode {
             Mode::Fluid => {
-                sims.extend([
-                    (pass("fluid_advect"), grid),
-                    (pass("fluid_divergence"), grid),
-                ]);
+                sims.extend(
+                    [
+                        "fluid_advect",
+                        "fluid_curl",
+                        "fluid_vorticity",
+                        "fluid_divergence",
+                    ]
+                    .map(|e| (pass(e), grid)),
+                );
                 sims.extend((0..PRESSURE).map(|k| (flipped("fluid_pressure", k % 2), grid)));
                 sims.extend([(pass("fluid_project"), grid), (pass("fluid_copy"), grid)]);
             }
@@ -398,21 +524,14 @@ impl Gpu<'_, '_> {
         let particles = crossing.map_or(0, |c| c.particles().1);
         let offsets = tracker.offsets;
         let (sources, targets) = crossing.map_or((0, 0), Crossing::counts);
-        let regions = [
-            layout.region(0),
-            current,
-            previous,
-            layout.region(3),
-            layout.region(4),
-            layout.region(5),
-            layout.region(6),
-            layout.region(7),
-            layout.region(8),
-            layout.region(9),
-            layout.region(10),
-            layout.region(11),
-        ];
-        let header: [(usize, u32); 30] = [
+        // Regions in header order: 16 scene, 17 this frame's final image, 18
+        // the last one, then the rest as laid out.
+        let regions = (0..REGIONS).map(|i| match i {
+            1 => current,
+            2 => previous,
+            _ => layout.region(i),
+        });
+        let header: [(usize, u32); 31] = [
             (0, u32::from(cols)),
             (1, u32::from(rows)),
             (2, frame.t.to_bits()),
@@ -429,28 +548,26 @@ impl Gpu<'_, '_> {
             (13, to.act.post.code()),
             (14, u32::from(frame.dither)),
             (15, if swarm { SWARM } else { 0 }),
+            (34, 0),
             (35, offsets.ascii),
             (36, glyphs.ascii_len()),
             (37, offsets.points),
             (38, offsets.homes),
             (39, offsets.homes_count),
             (40, offsets.art),
+            (41, offsets.orbit),
             (42, latest),
             (43, u32::from(reset)),
-            (44, frame.sound.level.to_bits()),
-            (45, frame.sound.bass.to_bits()),
-            (46, frame.sound.mid.to_bits()),
-            (47, frame.sound.treble.to_bits()),
-            (34, 0),
-            (41, 0),
+            (44, offsets.orbit_len),
+            (45, layout.region(18)),
+            (46, if flames { FLAME_THREADS } else { 0 }),
+            (47, FLAME_STEPS),
+            (48, 0),
         ];
         let mut params = vec![0_u32; HEADER];
-        for (i, value) in header.into_iter().chain(
-            regions
-                .into_iter()
-                .enumerate()
-                .map(|(i, r)| (16_usize.saturating_add(i), r)),
-        ) {
+        // Regions 0-15 go to words 16-31, the last three after the ones above.
+        let slots = (16..34).chain([45]);
+        for (i, value) in header.into_iter().chain(slots.zip(regions)) {
             if let Some(slot) = params.get_mut(i) {
                 *slot = value;
             }
@@ -464,7 +581,6 @@ impl Gpu<'_, '_> {
         params.extend(to.block(from_len, frame.t - born_to));
 
         let image = num::u32_of(cells.saturating_mul(32));
-        let bloom = num::u32_of(cells.saturating_mul(2));
         let cell_count = num::u32_of(cells);
         let mut passes = Vec::new();
         if particles > 0 || swarm {
@@ -476,17 +592,25 @@ impl Gpu<'_, '_> {
         if swarm {
             passes.push((pass("swarm"), SWARM));
         }
+        if flames {
+            passes.extend([(pass("splat_fade"), image), (pass("flame"), FLAME_THREADS)]);
+        }
         passes.push((pass("field_seed"), grid));
         passes.extend((0..JUMPS).rev().map(|k| (jump(k), grid)));
+        passes.extend([(pass("field_finish"), grid), (pass("backdrops"), grid)]);
         passes.extend(sims);
-        passes.extend([
-            (pass("scene"), image),
-            (pass("bloom_down"), bloom),
-            (pass("bloom_horizontal"), bloom),
-            (pass("bloom_vertical"), bloom),
-            (pass("post"), image),
-            (pass("encode"), cell_count),
-        ]);
+        passes.push((pass("scene"), image));
+        for level in 0..BLOOM_LEVELS {
+            let size = (u32::from(cols) >> level)
+                .max(1)
+                .saturating_mul((u32::from(rows).saturating_mul(2) >> level).max(1));
+            passes.extend([
+                (leveled("bloom_down", level, 0), size),
+                (leveled("bloom_blur", level, 0), size),
+                (leveled("bloom_blur", level, 1), size),
+            ]);
+        }
+        passes.extend([(pass("post"), image), (pass("encode"), cell_count)]);
         self.job.params = params;
         self.job.passes = passes;
         self.job.state = layout.total;
@@ -505,6 +629,9 @@ impl Gpu<'_, '_> {
             let homes = transition::homes(to, usize::try_from(SWARM).unwrap_or(usize::MAX));
             self.tracker.homes = (to.id, homes);
         }
+        if self.tracker.orbit.is_empty() {
+            self.tracker.orbit = backdrop::reference_orbit();
+        }
         let key = (
             from.id,
             to.id,
@@ -518,6 +645,8 @@ impl Gpu<'_, '_> {
         let mut data = glyphs.pack();
         let ascii = num::u32_of(data.len());
         data.extend(glyphs.pack_ascii());
+        let orbit = num::u32_of(data.len());
+        data.extend_from_slice(&self.tracker.orbit);
         let art = num::u32_of(data.len());
         data.extend(from.texels());
         if from.id != to.id {
@@ -536,8 +665,11 @@ impl Gpu<'_, '_> {
         if swarm {
             data.extend_from_slice(&self.tracker.homes.1);
         }
+        let orbit_len = num::u32_of(self.tracker.orbit.len() / 2);
         self.tracker.offsets = Inputs {
             ascii,
+            orbit,
+            orbit_len,
             art,
             points,
             homes,
@@ -560,6 +692,7 @@ impl Gpu<'_, '_> {
         self.job.output = output.clone();
         self.job.cover = self.buffers.add(buffer(vec![0; cells.saturating_mul(32)]));
         self.job.color = self.buffers.add(buffer(vec![0; cells.saturating_mul(8)]));
+        self.job.hist = self.buffers.add(buffer(vec![0; cells.saturating_mul(64)]));
         if let Some(old) = self.tracker.readback.take() {
             self.commands.entity(old).despawn();
         }
@@ -587,7 +720,7 @@ fn init_pipelines(mut commands: Commands, cache: Res<PipelineCache>) {
         "showcase",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
-            (read(), read(), write(), write(), write(), write()),
+            (read(), read(), write(), write(), write(), write(), write()),
         ),
     );
     let ids = all_passes()
@@ -660,11 +793,12 @@ fn prepare_bind_group(
             .get(handle)
             .map(|b| b.buffer.as_entire_buffer_binding())
     };
-    let (Some(inputs), Some(output), Some(cover), Some(color)) = (
+    let (Some(inputs), Some(output), Some(cover), Some(color), Some(hist)) = (
         get(&job.inputs),
         get(&job.output),
         get(&job.cover),
         get(&job.color),
+        get(&job.hist),
     ) else {
         commands.remove_resource::<Bound>();
         return;
@@ -679,6 +813,7 @@ fn prepare_bind_group(
             output,
             cover,
             color,
+            hist,
         )),
     );
     commands.insert_resource(Bound(bind_group));
@@ -690,6 +825,7 @@ fn dispatch(
     pipelines: Res<Pipelines>,
     bound: Option<Res<Bound>>,
     job: Option<Res<Job>>,
+    mut queries: Option<ResMut<Queries>>,
 ) {
     let (Some(bound), Some(job)) = (bound, job) else {
         return;
@@ -699,27 +835,47 @@ fn dispatch(
         .passes
         .iter()
         .map(|(p, threads)| {
-            pipelines
+            let pipeline = pipelines
                 .ids
                 .get(p)
-                .and_then(|&id| cache.get_compute_pipeline(id))
-                .map(|pl| (pl, *threads))
+                .and_then(|&id| cache.get_compute_pipeline(id))?;
+            Some((phase(p), pipeline, *threads))
         })
         .collect();
     let Some(ready) = ready else { return };
-    let mut pass = context
-        .command_encoder()
-        .begin_compute_pass(&ComputePassDescriptor {
-            label: Some("showcase"),
-            ..default()
+    let encoder = context.command_encoder();
+    // One compute pass per phase, timed when profiling.
+    let mut names = Vec::new();
+    let mut rest = ready.as_slice();
+    while let Some(&(name, _, _)) = rest.first() {
+        let count = rest.iter().take_while(|(p, _, _)| *p == name).count();
+        let (group, tail) = rest.split_at_checked(count).unwrap_or((rest, &[]));
+        rest = tail;
+        let index = num::u32_of(names.len());
+        let timed = queries.as_ref().filter(|_| index < profile::PHASES);
+        let timestamp_writes = timed.map(|q| wgpu::ComputePassTimestampWrites {
+            query_set: &q.set,
+            beginning_of_pass_write_index: Some(index.saturating_mul(2)),
+            end_of_pass_write_index: Some(index.saturating_mul(2).saturating_add(1)),
         });
-    pass.set_bind_group(0, &bound.0, &[]);
-    for (pipeline, threads) in ready {
-        let workgroups = threads.div_ceil(WORKGROUP);
-        if workgroups > 0 {
-            pass.set_pipeline(pipeline);
-            pass.dispatch_workgroups(workgroups, 1, 1);
+        if timed.is_some() {
+            names.push(name);
         }
+        let mut compute = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some(name),
+            timestamp_writes,
+        });
+        compute.set_bind_group(0, &bound.0, &[]);
+        for (_, pipeline, threads) in group {
+            let workgroups = threads.div_ceil(WORKGROUP);
+            if workgroups > 0 {
+                compute.set_pipeline(pipeline);
+                compute.dispatch_workgroups(workgroups, 1, 1);
+            }
+        }
+    }
+    if let Some(queries) = queries.as_mut() {
+        queries.resolve(encoder, names);
     }
 }
 
@@ -765,11 +921,26 @@ mod tests {
     #[test]
     fn state_regions_follow_each_other() {
         let layout = Layout::new(120, 40);
-        let starts = (0..12).map(|i| layout.region(i));
+        let starts = (0..REGIONS).map(|i| layout.region(i));
         assert!(starts.clone().zip(starts.skip(1)).all(|(a, b)| a < b));
         assert_eq!(
-            u64::from(layout.region(11)) + u64::from(SWARM),
+            u64::from(layout.region(REGIONS - 1)) + u64::from(FLAME_THREADS),
             layout.total
         );
+    }
+
+    #[test]
+    fn every_pass_a_frame_can_ask_for_has_a_pipeline() {
+        let all = all_passes();
+        let wanted = [
+            "fluid_curl",
+            "fluid_vorticity",
+            "field_finish",
+            "backdrops",
+            "splat_fade",
+            "flame",
+        ];
+        assert!(wanted.iter().all(|e| all.iter().any(|p| p.entry == *e)));
+        assert!((0..BLOOM_LEVELS).all(|l| all.contains(&leveled("bloom_blur", l, 1))));
     }
 }

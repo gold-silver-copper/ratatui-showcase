@@ -2,7 +2,6 @@
 //! the wordmark take turns, scaled to fill any terminal.
 
 mod art;
-mod audio;
 mod backdrop;
 mod fonts;
 mod fx;
@@ -10,6 +9,7 @@ mod glyph_table;
 mod glyphs;
 mod gpu;
 mod num;
+mod profile;
 mod shader;
 mod stage;
 mod theme;
@@ -42,22 +42,23 @@ use crate::transition::{Crossing, KINDS};
 
 const USAGE: &str = "\
 usage: ratatui-showcase [--hold SECONDS] [--fps N] [--glyphs blocks|sextants|full]
-                        [--audio] [--watch] [--no-dither]
+                        [--watch] [--profile] [--dither]
 
   --hold       how long each scene stays on screen (default 7)
   --fps        frames per second (default 60)
   --glyphs     block characters the terminal draws well (default full: octants
                and wedges, as in foot, kitty, ghostty and wezterm)
-  --audio      move with the sound from the default microphone
   --watch      reload src/shaders when they change, to tune effects live
-  --no-dither  turn off temporal dithering (fewer cells change each frame)";
+  --profile    show how long each phase takes on the GPU in the caption
+  --dither     smooth colours by dithering over time (every cell changes every
+               frame, so the terminal works about three times as hard)";
 
 struct Config {
     hold: f32,
     fps: f64,
     glyphs: GlyphSet,
-    audio: bool,
     watch: bool,
+    profile: bool,
     dither: bool,
 }
 
@@ -66,9 +67,9 @@ fn config() -> std::result::Result<Config, String> {
         hold: 7.0,
         fps: 60.0,
         glyphs: GlyphSet::Full,
-        audio: false,
         watch: false,
-        dither: true,
+        profile: false,
+        dither: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -77,9 +78,9 @@ fn config() -> std::result::Result<Config, String> {
             "--hold" => config.hold = value()?.parse().map_err(|_| "--hold takes seconds")?,
             "--fps" => config.fps = value()?.parse().map_err(|_| "--fps takes a number")?,
             "--glyphs" => config.glyphs = GlyphSet::parse(&value()?).ok_or("unknown glyph set")?,
-            "--audio" => config.audio = true,
+            "--profile" => config.profile = true,
             "--watch" => config.watch = true,
-            "--no-dither" => config.dither = false,
+            "--dither" => config.dither = true,
             "-h" | "--help" => return Err(String::new()),
             _ => return Err(format!("unknown option {arg}")),
         }
@@ -122,9 +123,7 @@ fn main() -> ExitCode {
             RatatuiPlugins::default(),
             gpu::GpuPlugin {
                 watch: config.watch,
-            },
-            audio::AudioPlugin {
-                enabled: config.audio,
+                profile: config.profile,
             },
         ))
         .insert_resource(SystemFonts::load())
@@ -194,6 +193,7 @@ impl Show {
                 idle: Idle::Float,
                 mode: Mode::Flat,
                 post: Post::Bloom,
+                variant: 0,
             },
             stage: None,
             pending: None,
@@ -244,6 +244,7 @@ impl Show {
             },
             mode,
             post: pick(POSTS, None).unwrap_or(Post::Clean),
+            variant: fastrand::u32(..),
         }
     }
 }
@@ -301,6 +302,7 @@ fn input(
                 'b' => act.backdrop = pick(BACKDROPS, Some(act.backdrop)).unwrap_or(act.backdrop),
                 'l' => act.look = pick(LOOKS, Some(act.look)).unwrap_or(act.look),
                 'p' => act.post = pick(POSTS, Some(act.post)).unwrap_or(act.post),
+                'w' => act.idle = pick(IDLES, Some(act.idle)).unwrap_or(act.idle),
                 'm' => {
                     act.mode = pick(MODES, Some(act.mode)).unwrap_or(act.mode);
                     if act.mode == Mode::Turntable {
@@ -324,7 +326,7 @@ fn frame(
     mut effects: ResMut<Effects>,
     (glyphs, fonts, time): (Res<Glyph>, Res<SystemFonts>, Res<Time>),
     mut gpu: gpu::Gpu,
-    (gpu_frame, hearing, dither): (Res<gpu::GpuFrame>, Res<audio::Hearing>, Res<Dither>),
+    (gpu_frame, dither): (Res<gpu::GpuFrame>, Res<Dither>),
 ) -> Result {
     let show = &mut *show;
     let effects = effects.0.get_mut().unwrap_or_else(PoisonError::into_inner);
@@ -413,7 +415,6 @@ fn frame(
         let frame_info = gpu::Frame {
             t,
             dt: dt.as_secs_f32(),
-            sound: hearing.sound,
             dither: dither.0,
         };
         gpu.render(&glyphs.0, stage, show.crossing.as_ref(), frame_info);
@@ -436,9 +437,14 @@ fn frame(
                 act.shader.name()
             );
             caption += &format!("  ·  {}  ·  {}", act.backdrop.name(), act.look.name());
-            caption += &format!("  ·  {}  ·  {}", act.mode.name(), act.post.name());
-            if let Some(status) = hearing.status {
-                caption += &format!("  ·  {status}");
+            caption += &format!(
+                "  ·  {}  ·  {}  ·  {}",
+                act.mode.name(),
+                act.post.name(),
+                act.idle.name()
+            );
+            if let Some(profile) = &gpu_frame.profile {
+                caption = format!("{profile}  ·  {caption}");
             }
             if let Some(error) = &gpu_frame.shader_error {
                 caption = format!(

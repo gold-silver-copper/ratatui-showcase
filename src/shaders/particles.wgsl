@@ -173,14 +173,171 @@ fn swarm(@builtin(global_invocation_id) id: vec3<u32>) {
     let delta = dt();
     let n = fbm(pos * 0.015 + vec2(t * 0.1, home.seed * 3.0));
     let curl = vec2(cos(n * TAU * 2.0), sin(n * TAU * 2.0));
-    let burst = smoothstep(0.92, 1.0, wrap(age(H_TO) / 6.0)) + bass() * 0.6;
+    let burst = smoothstep(0.92, 1.0, wrap(age(H_TO) / 6.0));
     let centre = vec2(w, h) / 2.0;
     let out = normalize(pos - centre + vec2(0.01)) * burst * 900.0;
-    let force = (vec2(home.x, home.y) - pos) * 7.0 - vel * 3.2 + curl * (60.0 + level() * 300.0) + out;
+    let force = (vec2(home.x, home.y) - pos) * 7.0 - vel * 3.2 + curl * 60.0 + out;
     vel += force * delta;
     pos += vel * delta;
     state[slot] = vec4(pos, vel);
     let speed = length(vel);
     let c = lerp(ink_at(H_TO, home.x, home.y, t), WHITE, clamp(speed / 900.0, 0.0, 0.6));
     splat(pos.x, pos.y, 2.0, c, 1.0);
+}
+
+// ---------------------------------------------------------------- flames and attractors
+//
+// Each thread carries one point (xy, colour index, random state) between
+// frames and moves it a few steps per frame, adding every position it visits
+// to a histogram that fades a little each frame. Millions of points per
+// frame build up the fine structure; tone mapping in the scene pass turns
+// hit counts into light.
+
+const FLAME_FADE: f32 = 0.88;
+
+fn hist_index(x: f32, y: f32) -> i32 {
+    if x < 0.0 || y < 0.0 || x >= width() || y >= height() { return -1; }
+    return i32((u32(y) * img_w() + u32(x)) * 2u);
+}
+
+fn hist_add(p: vec2<f32>, c: f32) {
+    let i = hist_index(p.x, p.y);
+    if i < 0 { return; }
+    atomicAdd(&hist[u32(i)], 1u);
+    atomicAdd(&hist[u32(i) + 1u], u32(clamp(c, 0.0, 1.0) * 255.0));
+}
+
+@compute @workgroup_size(64)
+fn splat_fade(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if i >= img_w() * img_h() { return; }
+    let count = atomicLoad(&hist[i * 2u]);
+    let index = atomicLoad(&hist[i * 2u + 1u]);
+    atomicStore(&hist[i * 2u], u32(f32(count) * FLAME_FADE));
+    atomicStore(&hist[i * 2u + 1u], u32(f32(index) * FLAME_FADE));
+}
+
+fn next_random(state: ptr<function, u32>) -> f32 {
+    var x = *state;
+    x ^= x << 13u;
+    x ^= x >> 17u;
+    x ^= x << 5u;
+    *state = x;
+    return f32(x >> 8u) / 16777216.0;
+}
+
+/// One of the classic flame variations.
+fn variation(v: u32, p: vec2<f32>) -> vec2<f32> {
+    let r2 = max(dot(p, p), 1e-6);
+    let r = sqrt(r2);
+    let theta = atan2(p.x, p.y);
+    switch v % 8u {
+        case 0u: { return p; }
+        // Eyefish, rather than sinusoidal: sine folds every point into a
+        // square, which reads as a box drawn around the art.
+        case 1u: { return p * 2.0 / (r + 1.0); }
+        case 2u: { return p / r2; }
+        case 3u: { return vec2(p.x * sin(r2) - p.y * cos(r2), p.x * cos(r2) + p.y * sin(r2)); }
+        case 4u: { return vec2((p.x - p.y) * (p.x + p.y), 2.0 * p.x * p.y) / r; }
+        case 5u: { return vec2(theta / PI, r - 1.0); }
+        case 6u: { return r * vec2(sin(theta * r), -cos(theta * r)); }
+        default: { return theta / PI * vec2(sin(PI * r), cos(PI * r)); }
+    }
+}
+
+/// Which scene's backdrop is splatted this frame: the new one's, else the old.
+fn splat_scene() -> u32 { return select(H_FROM, H_TO, splatted(H_TO)); }
+
+@compute @workgroup_size(64)
+fn flame(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if i >= params[H_FLAME_THREADS] { return; }
+    let s = splat_scene();
+    let kind_of = params[s + S_BACKDROP];
+    let slot = params[H_FLAME] + i;
+    var st = state[slot];
+    var rng = bitcast<u32>(st.w);
+    if rng == 0u || reset() {
+        rng = (i + 1u) * 747796405u + 2891336453u;
+        st = vec4(next_random(&rng) * 2.0 - 1.0, next_random(&rng) * 2.0 - 1.0, next_random(&rng), 0.0);
+        if kind_of == 17u { st = vec4(st.x * 10.0, st.y * 10.0, 20.0 + st.z * 10.0, 0.0); }
+    }
+    let t = time() * 0.6;
+    let v = variant(s);
+    let centre = vec2(width(), height()) / 2.0;
+    let unit = min(width() / pf(H_ASPECT), height());
+    var p = st.xy;
+    var c = st.z;
+    for (var k = 0u; k < params[H_FLAME_STEPS]; k++) {
+        var screen = vec2(0.0);
+        switch kind_of {
+            case 14u: {
+                // A fractal flame: three drifting transforms, each warped by a variation.
+                let r = next_random(&rng);
+                let j = u32(r * 3.0);
+                let fj = f32(j);
+                let angle = fj * 2.094 + t * 0.05 * (fj + 1.0) * select(1.0, -1.0, j == 1u);
+                let scale = 0.55 + 0.15 * sin(t * 0.07 + fj);
+                let offset = 0.6 * vec2(cos(fj * 2.094 + t * 0.03), sin(fj * 2.094 + t * 0.03));
+                let q = rot(angle) * p * scale + offset;
+                p = mix(q, variation(v * 3u + j, q), 0.7);
+                c = (c + fj / 3.0 + 0.1) * 0.5;
+                screen = centre + p * unit * 0.4;
+            }
+            case 15u: {
+                // Clifford attractor.
+                let a = -1.7 + 0.15 * sin(t * 0.05);
+                let b = 1.3 + 0.1 * cos(t * 0.04);
+                let cc = -0.1 + 0.2 * sin(t * 0.03);
+                let d = -1.21 + 0.1 * cos(t * 0.06);
+                let q = vec2(sin(a * p.y) + cc * cos(a * p.x), sin(b * p.x) + d * cos(b * p.y));
+                c = clamp(length(q - p) * 0.35, 0.0, 1.0);
+                p = q;
+                screen = centre + p * unit * 0.3;
+            }
+            case 16u: {
+                // De Jong attractor.
+                let a = 1.641 + 0.2 * sin(t * 0.04);
+                let b = 1.902 + 0.2 * cos(t * 0.05);
+                let cc = 0.316 + 0.3 * sin(t * 0.03);
+                let d = 1.525 + 0.2 * cos(t * 0.035);
+                let q = vec2(sin(a * p.y) - cos(b * p.x), sin(cc * p.x) - cos(d * p.y));
+                c = clamp(length(q - p) * 0.3, 0.0, 1.0);
+                p = q;
+                screen = centre + p * unit * 0.33;
+            }
+            default: {
+                // The Lorenz butterfly, turning slowly.
+                var x = vec3(p, st.z);
+                let h = 0.004;
+                let velocity = vec3(10.0 * (x.y - x.x), x.x * (28.0 - x.z) - x.y, x.x * x.y - 8.0 / 3.0 * x.z);
+                x += velocity * h;
+                p = x.xy;
+                st.z = x.z;
+                c = clamp(length(velocity) / 180.0, 0.0, 1.0);
+                let a = t * 0.15;
+                let view = vec2(x.x * cos(a) - x.y * sin(a), -(x.z - 25.0));
+                screen = centre + view * unit / 36.0;
+            }
+        }
+        hist_add(screen, c);
+    }
+    if kind_of == 17u { st = vec4(p, st.z, bitcast<f32>(rng)); } else { st = vec4(p, c, bitcast<f32>(rng)); }
+    // A point that escapes to infinity starts over.
+    if any(abs(st.xyz) > vec3(1e4)) || any(st.xyz != st.xyz) { st = vec4(0.0); }
+    state[slot] = st;
+}
+
+/// The splatted backdrop's light at sample `(x, y)`.
+fn splat_light(s: u32, x: f32, y: f32) -> vec3<f32> {
+    let i = hist_index(x, y);
+    if i < 0 { return vec3(0.0); }
+    let count = f32(atomicLoad(&hist[u32(i)]));
+    if count <= 0.0 { return vec3(0.0); }
+    let index = f32(atomicLoad(&hist[u32(i) + 1u])) / (count * 255.0);
+    // Exposure from how many points land per frame, spread over the screen.
+    let per_frame = f32(params[H_FLAME_THREADS] * params[H_FLAME_STEPS]);
+    let typical = per_frame / (1.0 - FLAME_FADE) / (width() * height()) * 3.0;
+    let light = log(1.0 + count) / log(1.0 + typical * 6.0);
+    return sample(s, index * 0.85 + time() * 0.02) * clamp(light, 0.0, 1.4);
 }

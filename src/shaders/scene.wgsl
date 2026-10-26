@@ -4,6 +4,10 @@
 fn layer_art(s: u32, layer: u32, x: f32, y: f32, t: f32, row: u32) -> Art {
     let m = mode(s);
     if m == M_TURNTABLE { return turntable(s, layer, x, y, t, row); }
+    let simulated = layer == 1u && m >= M_FLUID && m <= M_FIRE;
+    // Far from flat art there is nothing to draw: not even glow or shadow.
+    let reach = max(pf(s + S_GLOW), 1.0) * 6.0 + max(pf(s + S_WIDTH), 1.0) * 3.0;
+    if !simulated && sdf(layer, x, y) > reach { return Art(vec3(0.0), 0.0, vec3(0.0), 0.0, 0.0); }
     if layer == 1u {
         if m == M_FLUID || m == M_REACTION || m == M_LIFE || m == M_FIRE { return sim_art(s, x, y, t, row); }
         if m == M_SWARM {
@@ -44,20 +48,27 @@ fn scene(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let x01 = p.x / width();
     let y01 = p.y / height();
-    let px = sx / COLS;
-    let py = sy / (ROWS / 2u);
 
-    // Backgrounds, mixed between the scenes.
+    // Backgrounds, mixed between the scenes, from the grid the backdrop pass
+    // drew; flames and attractors come from their histogram.
     let m = backdrop_mix(x01, y01);
     var base: vec3<f32>;
     if k == K_CRT {
-        let layer = select(H_TO, H_FROM, progress() < 0.5);
-        base = select(vec3(0.0), backdrop(layer, x01, y01, px, py, t) * (1.0 - crt_q()), warp(0u, p.x, p.y).z > 0.0);
+        let bg = select(H_BG_NEW, H_BG_OLD, progress() < 0.5);
+        base = select(vec3(0.0), grid_sample(bg, p).rgb * (1.0 - crt_q()), warp(0u, p.x, p.y).z > 0.0);
     } else {
         var bg_new = vec3(0.0);
         var bg_old = vec3(0.0);
-        if m > 0.0 { bg_new = backdrop(H_TO, x01, y01, px, py, t) * halo(H_TO, 1u, p.x, p.y); }
-        if m < 1.0 { bg_old = backdrop(H_FROM, x01, y01, px, py, t) * halo(H_FROM, 0u, p.x, p.y); }
+        if m > 0.0 {
+            bg_new = grid_sample(H_BG_NEW, p).rgb;
+            if splatted(H_TO) { bg_new += splat_light(H_TO, p.x, p.y); }
+            bg_new *= halo(H_TO, 1u, p.x, p.y);
+        }
+        if m < 1.0 {
+            bg_old = grid_sample(H_BG_OLD, p).rgb;
+            if splatted(H_FROM) && !splatted(H_TO) { bg_old += splat_light(H_FROM, p.x, p.y); }
+            bg_old *= halo(H_FROM, 0u, p.x, p.y);
+        }
         base = mixl(bg_old, bg_new, m);
     }
     base += light(p.x, p.y);
@@ -65,6 +76,7 @@ fn scene(@builtin(global_invocation_id) id: vec3<u32>) {
     var ink = vec3(0.0);
     var alpha = 0.0;
     var shadow = 0.0;
+    var blur = 0.0;
     if k == K_MELT {
         // The old shape's distance field flows into the new one's.
         let e = ease_in_out(progress());
@@ -92,6 +104,7 @@ fn scene(@builtin(global_invocation_id) id: vec3<u32>) {
             weight += a.alpha * op;
             base += a.glow * op;
             shadow = max(shadow, a.shadow * op);
+            blur = max(blur, a.blur * op);
         }
         if weight > 0.0 { ink /= weight; }
         alpha = min(weight, 1.0);
@@ -114,5 +127,6 @@ fn scene(@builtin(global_invocation_id) id: vec3<u32>) {
 
     base *= 1.0 - shadow;
     let colour = mixl(base, ink, alpha) + WHITE * glint;
-    state[params[H_SCENE] + i] = vec4(colour, alpha);
+    // Alpha carries the depth-of-field blur radius to the post pass.
+    state[params[H_SCENE] + i] = vec4(colour, blur);
 }

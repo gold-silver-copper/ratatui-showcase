@@ -24,7 +24,7 @@ fn escape_color(s: u32, mu: f32, limit: f32, t: f32) -> vec3<f32> {
 fn julia(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
     // Along the edge of the Mandelbrot set's main cardioid, where Julia sets
     // stay connected and full of filigree.
-    let a = t * 0.07 + treble() * 0.4;
+    let a = t * 0.07;
     let w = vec2(cos(a), sin(a)) * 0.5;
     let c = (w - vec2(w.x * w.x - w.y * w.y, 2.0 * w.x * w.y)) * 0.985;
     var z = plane(x, y, vec2(0.0), 2.1);
@@ -37,15 +37,37 @@ fn julia(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
     return escape_color(s, select(smooth_escape(i, z), limit, i >= limit), limit, t);
 }
 
+fn orbit(n: u32) -> vec2<f32> {
+    let o = params[H_IN_ORBIT] + min(n, max(params[H_ORBIT_LEN], 1u) - 1u) * 2u;
+    return vec2(bitcast<f32>(inputs[o]), bitcast<f32>(inputs[o + 1u]));
+}
+
+fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+
+/// An endless zoom into seahorse valley, in and back out every few minutes.
+/// f32 can't tell neighbouring pixels apart past about 1e-6, so each pixel
+/// only follows its small difference from a reference orbit the CPU
+/// computed in double precision, and starts over from the reference
+/// ("rebases") when the difference would grow larger than the orbit.
 fn mandelbrot(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
-    let scale = 2.8 * exp(-(age(s) % 26.0) * 0.33);
-    let c = plane(x, y, vec2(-0.743643887, 0.131825904), scale);
-    var z = vec2(0.0);
-    let limit = 180.0;
+    // Deeper views need more iterations: about a thousand at 1e-8.
+    let depth = 18.0 * (0.5 - 0.5 * cos(t * TAU / 120.0));
+    let scale = 3.0 * exp(-depth);
+    let dc = vec2((x - 0.5) * pf(H_ASPECT), y - 0.5) * scale;
+    let limit = min(200.0 + 60.0 * depth + 4.0 * depth * depth, 3000.0);
+    var dz = vec2(0.0);
+    var m = 0u;
     var i = 0.0;
+    var z = vec2(0.0);
     for (; i < limit; i += 1.0) {
+        dz = cmul(2.0 * orbit(m) + dz, dz) + dc;
+        m += 1u;
+        z = orbit(m) + dz;
         if dot(z, z) > 16.0 { break; }
-        z = vec2(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + c;
+        if dot(z, z) < dot(dz, dz) || m + 1u >= params[H_ORBIT_LEN] {
+            dz = z;
+            m = 0u;
+        }
     }
     return escape_color(s, select(smooth_escape(i, z), limit, i >= limit), limit, t);
 }
@@ -99,7 +121,7 @@ fn tunnel(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
     let p = vec2((x - 0.5) * pf(H_ASPECT), y - 0.5);
     let r = max(length(p), 1e-3);
     let u = atan2(p.y, p.x) / PI + t * 0.05;
-    let v = 0.3 / r + t * (0.6 + bass());
+    let v = 0.3 / r + t * 0.6;
     let checker = select(0.65, 1.0, (u32(floor(u * 8.0) + floor(v * 4.0)) & 1u) == 0u);
     let n = fbm(vec2(u * 6.0, v * 2.0));
     return sample(s, v * 0.15 + n * 0.3) * checker * smoothstep(0.0, 0.35, r) * 0.9;
@@ -114,7 +136,7 @@ fn warp_stars(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
         let sectors = 120.0 + f32(layer) * 70.0;
         let sector = floor((a / TAU + 0.5) * sectors);
         let seed = hash(u32(sector) + layer * 977u, 3u);
-        let speed = 0.25 + seed * 0.5 + bass() * 0.5;
+        let speed = 0.25 + seed * 0.5;
         let depth = wrap(seed * 7.0 + t * speed);
         let star = depth * depth * 0.9;
         let trail = 0.01 + depth * 0.08;
@@ -223,7 +245,7 @@ fn backdrop(s: u32, x: f32, y: f32, px: u32, py: u32, t: f32) -> vec3<f32> {
     let dx = x - 0.5;
     let dy = y - 0.5;
     let dither = hash(px, py + 7u) * 2.5 / 255.0;
-    let base = background(s) * (1.6 - 1.8 * (dx * dx + dy * dy)) * (1.0 + level() * 0.6) + vec3(dither);
+    let base = background(s) * (1.6 - 1.8 * (dx * dx + dy * dy)) + vec3(dither);
     switch params[s + S_BACKDROP] {
         case 1u: {
             let seed = hash(px / 2u, py / 4u);
@@ -236,7 +258,7 @@ fn backdrop(s: u32, x: f32, y: f32, px: u32, py: u32, t: f32) -> vec3<f32> {
             let glow = sample(s, 0.15) * 0.35 * exp(-pow((y - horizon) * 14.0, 2.0));
             if y < horizon { return base + sample(s, 0.75) * 0.12 * pow(y / horizon, 2.0) + glow; }
             let depth = 1.0 / (y - horizon + 0.02);
-            let z = depth * 0.6 + t * (1.2 + bass() * 2.0);
+            let z = depth * 0.6 + t * 1.2;
             let lane = dx * aspect * depth * 0.9;
             let fade = pow((y - horizon) / (1.0 - horizon), 0.6);
             let grid = max(line(z, 0.12), line(lane, 0.08 * min(depth, 10.0) / 4.0));
@@ -264,6 +286,28 @@ fn backdrop(s: u32, x: f32, y: f32, px: u32, py: u32, t: f32) -> vec3<f32> {
         case 11u: { return warp_stars(s, x, y, t); }
         case 12u: { return mandelbulb(s, x, y, t) * 0.75; }
         case 13u: { return menger_sponge(s, x, y, t) * 0.75; }
+        // Flames and attractors are drawn over this from their histogram.
+        case 14u, 15u, 16u, 17u: { return background(s) * 0.7 + vec3(dither); }
         default: { return base; }
+    }
+}
+
+/// Whether a backdrop is drawn by splatting points (flames, attractors).
+fn splatted(s: u32) -> bool { let b = params[s + S_BACKDROP]; return b >= 14u && b <= 17u; }
+
+/// Backgrounds for the grid, for the scene to sample: the new scene's
+/// always, the old one's while a transition shows it.
+@compute @workgroup_size(64)
+fn backdrops(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if i >= grid_w() * grid_h() { return; }
+    let gx = i % grid_w();
+    let gy = i / grid_w();
+    let x = (f32(gx) + 0.5) / f32(grid_w());
+    let y = (f32(gy) + 0.5) / f32(grid_h());
+    let t = time();
+    state[params[H_BG_NEW] + i] = vec4(backdrop(H_TO, x, y, gx, gy, t), 1.0);
+    if kind() != K_STILL {
+        state[params[H_BG_OLD] + i] = vec4(backdrop(H_FROM, x, y, gx, gy, t), 1.0);
     }
 }

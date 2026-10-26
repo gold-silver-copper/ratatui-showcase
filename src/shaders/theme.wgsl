@@ -29,17 +29,16 @@ fn sparkle(u: f32, v: f32, t: f32, density: f32) -> f32 {
 /// The scene's ink colour at `(u, v)` within the art.
 fn shade_ink(s: u32, u: f32, v: f32, t: f32, row: u32) -> vec3<f32> {
     let d = length(vec2(u, v) - 0.5);
-    let tt = t + treble() * 2.0;
     switch params[s + S_SHADER] {
-        case 0u: { return sample(s, 0.6 * u + 0.4 * v - 0.08 * tt); }
+        case 0u: { return sample(s, 0.6 * u + 0.4 * v - 0.08 * t); }
         case 1u: {
             let w = sin(u * 7.0 + t * 0.9) + sin(v * 9.0 - t * 1.1) + sin((u + v) * 5.0 + t * 0.6)
                 + sin(d * 12.0 - t * 1.4);
             return sample(s, w * 0.125 + 0.5 + t * 0.02);
         }
-        case 2u: { return sample(s, d * 1.6 - t * 0.15 - bass() * 0.3); }
+        case 2u: { return sample(s, d * 1.6 - t * 0.15); }
         case 3u: { return lerp(sample(s, u * 0.5 + t * 0.03), WHITE, sweep(u + v * 0.6, t) * 0.8); }
-        case 4u: { return hsl(u * 0.9 + v * 0.3 - tt * 0.1, 0.85, 0.62); }
+        case 4u: { return hsl(u * 0.9 + v * 0.3 - t * 0.1, 0.85, 0.62); }
         case 5u: {
             let line = select(0.72, 1.0, row % 2u == 0u);
             let roll_at = t * 0.25 - floor(t * 0.25 / 1.4) * 1.4;

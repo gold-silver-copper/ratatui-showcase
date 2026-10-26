@@ -91,4 +91,38 @@ mod tests {
         let result = super::validate(&super::built_in());
         assert!(result.is_ok(), "{}", result.err().unwrap_or_default());
     }
+
+    /// Pipelines fill in STEP and FLIP before compiling, and naga can reject
+    /// an entry point then that validated without them.
+    #[test]
+    fn every_entry_point_survives_its_pipeline_constants() {
+        let source = super::built_in();
+        let Ok(module) = naga::front::wgsl::parse_str(&source) else {
+            return;
+        };
+        let flags = naga::valid::ValidationFlags::all();
+        let Ok(info) =
+            naga::valid::Validator::new(flags, naga::valid::Capabilities::all()).validate(&module)
+        else {
+            return;
+        };
+        for entry in &module.entry_points {
+            for (step, flip) in [(0.0, 0.0), (1.0, 1.0), (2.0, 0.0), (2048.0, 1.0)] {
+                let constants = naga::back::PipelineConstants::from([
+                    ("STEP".into(), step),
+                    ("FLIP".into(), flip),
+                ]);
+                let stage = Some((naga::ShaderStage::Compute, entry.name.as_str()));
+                let result = naga::back::pipeline_constants::process_overrides(
+                    &module, &info, stage, &constants,
+                );
+                assert!(
+                    result.is_ok(),
+                    "{} with STEP {step} FLIP {flip}: {:?}",
+                    entry.name,
+                    result.err()
+                );
+            }
+        }
+    }
 }

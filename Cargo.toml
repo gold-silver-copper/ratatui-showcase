@@ -11,13 +11,13 @@ ab_glyph = "0.2.32"
 bevy = { version = "0.20.0", default-features = false, features = ["async_executor", "bevy_asset", "bevy_image", "bevy_render", "bevy_shader", "bevy_window", "multi_threaded", "std"] }
 bevy_ratatui = "0.13.0"
 bytemuck = "1.25.2"
-cpal = { version = "0.18.2", optional = true }
 fastrand = "2.5.0"
 font8x8 = "0.3.1"
 fontdb = "0.24.0"
-naga = { version = "30.0.1", features = ["wgsl-in"] }
+naga = { version = "30.0.1", features = ["wgsl-in", "spv-out"] }
 ratatui = "0.30.2"
 tachyonfx = { version = "0.25.2", features = ["sendable"] }
+wgpu = { version = "30.0.1", default-features = false }
 
 [profile.dev]
 opt-level = 1
@@ -66,7 +66,3 @@ cast_sign_loss = "forbid"
 arithmetic_side_effects = "forbid"
 disallowed_methods = "forbid"
 
-[features]
-default = ["audio"]
-# React to the room's sound with `--audio` (needs ALSA on Linux).
-audio = ["dep:cpal"]
