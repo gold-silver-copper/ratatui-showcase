@@ -48,7 +48,7 @@ cargo run --release -- --profile   # GPU time per phase in the caption
 - **Modes:** flat; a solid that turns in 3D above a reflective floor, with
   soft shadows, ambient occlusion and depth of field; dye in a swirling fluid;
   coral, mitosis, worms, mazes or spots grown by reaction-diffusion; the Game
-  of Life; burning letters with rising smoke; under rippling water; a swarm
+  of Life; burning letters with rising smoke; a swarm
   of particles that hold the shape; slime mold whose trail network draws the
   letters; a flock of boids that gathers into them; letters crumbling into
   falling sand; crystals branching until they fill the letters; ink rising
@@ -159,7 +159,7 @@ window. Each frame is a chain of compute passes (`src/shaders`):
    ray-marching cost a quarter as much. The Mandelbrot zoom follows a reference
    orbit computed in double precision on the CPU, so it can go to 1e-8 in f32.
 5. **Simulations**: the fluid (advection, vorticity confinement, a pressure
-   solve), reaction-diffusion, Life, fire and ripples, stepped 60 times a second
+   solve), reaction-diffusion, Life and fire, stepped 60 times a second
    whatever the frame rate; their state stays on the GPU between frames. When
    the next scene simulates too, the old one's last look is frozen for the
    transition; otherwise it keeps running until it is gone.

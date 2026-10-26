@@ -301,7 +301,6 @@ fn all_passes() -> Vec<Pass> {
     for entry in [
         "life",
         "fire",
-        "ripple",
         "slime_agents",
         "slime_diffuse",
         "crystal",
@@ -747,10 +746,6 @@ impl Gpu<'_, '_> {
                 Mode::Fire => {
                     steps = ticks.min(MAX_TICKS);
                     sims.extend(numbered_steps("fire", steps, grid));
-                }
-                Mode::Ripple => {
-                    steps = ticks.min(MAX_TICKS);
-                    sims.extend(numbered_steps("ripple", steps, grid));
                 }
                 Mode::Slime => {
                     // Each step: the agents move and leave trails, then the

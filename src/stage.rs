@@ -116,8 +116,6 @@ pub enum Mode {
     Life,
     /// Burning.
     Fire,
-    /// Under rippling water.
-    Ripple,
     /// A swarm of particles.
     Swarm,
     /// Slime mold: agents follow each other's trails into the letters.
@@ -143,7 +141,6 @@ impl Mode {
         Mode::Reaction,
         Mode::Life,
         Mode::Fire,
-        Mode::Ripple,
         Mode::Swarm,
         Mode::Slime,
         Mode::Boids,
@@ -169,7 +166,6 @@ impl Mode {
             | Mode::Reaction
             | Mode::Life
             | Mode::Fire
-            | Mode::Ripple
             | Mode::Slime
             | Mode::Sand
             | Mode::Crystal
@@ -187,7 +183,6 @@ impl Mode {
             Mode::Reaction => "coral",
             Mode::Life => "life",
             Mode::Fire => "fire",
-            Mode::Ripple => "water",
             Mode::Swarm => "swarm",
             Mode::Slime => "slime mold",
             Mode::Boids => "boids",

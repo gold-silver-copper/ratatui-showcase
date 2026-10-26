@@ -187,7 +187,6 @@ impl Layer for Mode {
     fn busyness(self) -> u32 {
         match self {
             Mode::Flat => 0,
-            Mode::Ripple => 1,
             Mode::Turntable | Mode::Swarm | Mode::Boids | Mode::Sand | Mode::Crystal => 2,
             Mode::Fluid
             | Mode::Reaction
@@ -206,7 +205,6 @@ impl Layer for Mode {
             | Mode::Reaction
             | Mode::Life
             | Mode::Fire
-            | Mode::Ripple
             | Mode::Swarm
             | Mode::Slime
             | Mode::Boids

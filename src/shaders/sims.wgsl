@@ -262,27 +262,6 @@ fn fire_source(p: vec2<f32>) -> bool {
     return inside_sim(p);
 }
 
-// ---------------------------------------------------------------- ripples
-
-@compute @workgroup_size(64)
-fn ripple(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
-    let i = thread(id, groups);
-    if i >= grid_w() * grid_h() { return; }
-    let src = sim_src();
-    let dst = sim_dst();
-    if reset() { state[at(dst, i)] = vec4(0.0); return; }
-    let gx = i32(i % grid_w());
-    let gy = i32(i / grid_w());
-    let here = grid_load(src, gx, gy);
-    let n = neighbours(src, gx, gy);
-    let lap = n[0].x + n[1].x + n[2].x + n[3].x - 4.0 * here.x;
-    var h = (2.0 * here.x - here.y + 0.25 * lap) * 0.996;
-    // Rain: a few drops each second.
-    let drop = hash3(u32(gx / 4), u32(gy / 4) * 7919u, step_seed());
-    if drop < 0.000008 { h += 8.0; }
-    state[at(dst, i)] = vec4(h, here.x, 0.0, 0.0);
-}
-
 // ---------------------------------------------------------------- display
 
 /// The simulation's newest buffer, once this frame's steps have run.
@@ -370,18 +349,8 @@ fn sim_art(s: u32, layer: u32, x: f32, y: f32, t: f32, row: u32, latest: u32) ->
     return out;
 }
 
-/// The water's surface offset at `p` from the heights in buffer `base`, for
-/// refracting everything below it.
-fn ripple_offset(base: u32, p: vec2<f32>) -> vec2<f32> {
-    let gx = i32(p.x / 2.0);
-    let gy = i32(p.y / 2.0);
-    let n = neighbours(base, gx, gy);
-    return vec2(n[1].x - n[0].x, n[3].x - n[2].x);
-}
-
 /// Freezes the old scene's simulation as it last looked, when a new one is
-/// about to take the buffers over: its colour and coverage, or for water
-/// its heights.
+/// about to take the buffers over: its colour and coverage.
 @compute @workgroup_size(64)
 fn snapshot(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
     let i = thread(id, groups);
@@ -389,10 +358,6 @@ fn snapshot(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroup
     let held = mark(MARK_SIM);
     if held == 0u || held == params[H_SIM_ID] { return; }
     let latest = select(H_SIM0, H_SIM1, (mark(MARK_PARITY) & 1u) == 1u);
-    if mode(H_FROM) == M_RIPPLE {
-        state[at(H_SNAPSHOT, i)] = state[at(latest, i)];
-        return;
-    }
     let p = grid_point(i);
     let a = sim_art(H_FROM, 0u, p.x, p.y, time(), u32(p.y / 4.0), latest);
     state[at(H_SNAPSHOT, i)] = vec4(a.color * a.alpha, a.alpha);
