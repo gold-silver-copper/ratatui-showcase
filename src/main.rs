@@ -2,6 +2,7 @@
 //! the wordmark take turns, scaled to fill any terminal.
 
 mod art;
+mod audio;
 mod backdrop;
 mod fonts;
 mod fx;
@@ -9,6 +10,7 @@ mod glyph_table;
 mod glyphs;
 mod gpu;
 mod num;
+mod shader;
 mod stage;
 mod theme;
 mod transition;
@@ -34,22 +36,29 @@ use crate::backdrop::{BACKDROPS, Backdrop};
 use crate::fonts::SystemFonts;
 use crate::glyphs::{GlyphSet, Glyphs};
 use crate::stage::Stage;
-use crate::stage::{Act, IDLES, Idle, LOOKS, Logo, Look, Subject, Word};
+use crate::stage::{Act, IDLES, Idle, LOOKS, Logo, Look, MODES, Mode, POSTS, Post, Subject, Word};
 use crate::theme::{SHADERS, Shader, THEMES};
 use crate::transition::{Crossing, KINDS};
 
 const USAGE: &str = "\
 usage: ratatui-showcase [--hold SECONDS] [--fps N] [--glyphs blocks|sextants|full]
+                        [--audio] [--watch] [--no-dither]
 
-  --hold     how long each scene stays on screen (default 7)
-  --fps      frames per second (default 60)
-  --glyphs   block characters the terminal draws well (default full: octants
-             and wedges, as in foot, kitty, ghostty and wezterm)";
+  --hold       how long each scene stays on screen (default 7)
+  --fps        frames per second (default 60)
+  --glyphs     block characters the terminal draws well (default full: octants
+               and wedges, as in foot, kitty, ghostty and wezterm)
+  --audio      move with the sound from the default microphone
+  --watch      reload src/shaders when they change, to tune effects live
+  --no-dither  turn off temporal dithering (fewer cells change each frame)";
 
 struct Config {
     hold: f32,
     fps: f64,
     glyphs: GlyphSet,
+    audio: bool,
+    watch: bool,
+    dither: bool,
 }
 
 fn config() -> std::result::Result<Config, String> {
@@ -57,6 +66,9 @@ fn config() -> std::result::Result<Config, String> {
         hold: 7.0,
         fps: 60.0,
         glyphs: GlyphSet::Full,
+        audio: false,
+        watch: false,
+        dither: true,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -65,6 +77,9 @@ fn config() -> std::result::Result<Config, String> {
             "--hold" => config.hold = value()?.parse().map_err(|_| "--hold takes seconds")?,
             "--fps" => config.fps = value()?.parse().map_err(|_| "--fps takes a number")?,
             "--glyphs" => config.glyphs = GlyphSet::parse(&value()?).ok_or("unknown glyph set")?,
+            "--audio" => config.audio = true,
+            "--watch" => config.watch = true,
+            "--no-dither" => config.dither = false,
             "-h" | "--help" => return Err(String::new()),
             _ => return Err(format!("unknown option {arg}")),
         }
@@ -105,10 +120,16 @@ fn main() -> ExitCode {
                 }),
             ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / config.fps.max(1.0))),
             RatatuiPlugins::default(),
-            gpu::GpuPlugin,
+            gpu::GpuPlugin {
+                watch: config.watch,
+            },
+            audio::AudioPlugin {
+                enabled: config.audio,
+            },
         ))
         .insert_resource(SystemFonts::load())
         .insert_resource(Glyph(Glyphs::new(config.glyphs)))
+        .insert_resource(Dither(config.dither))
         .insert_resource(Show::new(config.hold))
         .init_resource::<Effects>()
         .add_systems(PreUpdate, input)
@@ -123,6 +144,10 @@ fn main() -> ExitCode {
 
 #[derive(Resource)]
 struct Glyph(Glyphs);
+
+/// Whether colours are dithered over time.
+#[derive(Resource)]
+struct Dither(bool);
 
 /// Effects are `Send` but not `Sync`; with `ResMut` the lock is never contended.
 #[derive(Resource, Default)]
@@ -167,6 +192,8 @@ impl Show {
                 look: Look::Smooth,
                 style: Style::Solid,
                 idle: Idle::Float,
+                mode: Mode::Flat,
+                post: Post::Bloom,
             },
             stage: None,
             pending: None,
@@ -202,6 +229,7 @@ impl Show {
             (Subject::Logo(_), _) => Subject::Word(word()),
             (Subject::Word(_), _) => Subject::Logo(logo()),
         };
+        let mode = pick(MODES, Some(current.mode)).unwrap_or(Mode::Flat);
         Act {
             subject,
             theme: other(THEMES.len(), current.theme),
@@ -209,7 +237,13 @@ impl Show {
             backdrop: pick(BACKDROPS, None).unwrap_or(Backdrop::Vignette),
             look: pick(LOOKS, None).unwrap_or(Look::Smooth),
             style: pick(STYLES, None).unwrap_or(Style::Solid),
-            idle: pick(IDLES, None).unwrap_or(Idle::Still),
+            idle: if mode == Mode::Turntable {
+                Idle::Still
+            } else {
+                pick(IDLES, None).unwrap_or(Idle::Still)
+            },
+            mode,
+            post: pick(POSTS, None).unwrap_or(Post::Clean),
         }
     }
 }
@@ -242,6 +276,8 @@ fn input(
     mut show: ResMut<Show>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    // A new mode needs a fresh stage, so its simulation starts from scratch.
+    let mut rebuild = resizes.read().count() > 0;
     for key in keys.read().filter(|key| key.kind != KeyEventKind::Release) {
         let show = &mut *show;
         let act = show
@@ -264,14 +300,20 @@ fn input(
                 's' => act.shader = pick(SHADERS, Some(act.shader)).unwrap_or(act.shader),
                 'b' => act.backdrop = pick(BACKDROPS, Some(act.backdrop)).unwrap_or(act.backdrop),
                 'l' => act.look = pick(LOOKS, Some(act.look)).unwrap_or(act.look),
+                'p' => act.post = pick(POSTS, Some(act.post)).unwrap_or(act.post),
+                'm' => {
+                    act.mode = pick(MODES, Some(act.mode)).unwrap_or(act.mode);
+                    if act.mode == Mode::Turntable {
+                        act.idle = Idle::Still;
+                    }
+                    rebuild = true;
+                }
                 'i' => show.caption = !show.caption,
                 _ => {}
             }
         }
     }
-    if resizes.read().count() > 0
-        && let Some(stage) = show.stage.take()
-    {
+    if rebuild && let Some(stage) = show.stage.take() {
         show.act = stage.act;
     }
 }
@@ -280,10 +322,9 @@ fn frame(
     mut context: ResMut<RatatuiContext>,
     mut show: ResMut<Show>,
     mut effects: ResMut<Effects>,
-    glyphs: Res<Glyph>,
-    (fonts, time): (Res<SystemFonts>, Res<Time>),
+    (glyphs, fonts, time): (Res<Glyph>, Res<SystemFonts>, Res<Time>),
     mut gpu: gpu::Gpu,
-    gpu_frame: Res<gpu::GpuFrame>,
+    (gpu_frame, hearing, dither): (Res<gpu::GpuFrame>, Res<audio::Hearing>, Res<Dither>),
 ) -> Result {
     let show = &mut *show;
     let effects = effects.0.get_mut().unwrap_or_else(PoisonError::into_inner);
@@ -369,7 +410,13 @@ fn frame(
         }
 
         let Some(stage) = &show.stage else { return };
-        gpu.render(&glyphs.0, stage, show.crossing.as_ref(), t);
+        let frame_info = gpu::Frame {
+            t,
+            dt: dt.as_secs_f32(),
+            sound: hearing.sound,
+            dither: dither.0,
+        };
+        gpu.render(&glyphs.0, stage, show.crossing.as_ref(), frame_info);
         if let Some(cells) = gpu_frame.cells(area.width, area.height) {
             gpu::draw(cells, frame.buffer_mut());
         }
@@ -389,6 +436,16 @@ fn frame(
                 act.shader.name()
             );
             caption += &format!("  ·  {}  ·  {}", act.backdrop.name(), act.look.name());
+            caption += &format!("  ·  {}  ·  {}", act.mode.name(), act.post.name());
+            if let Some(status) = hearing.status {
+                caption += &format!("  ·  {status}");
+            }
+            if let Some(error) = &gpu_frame.shader_error {
+                caption = format!(
+                    "shader: {}",
+                    error.lines().find(|l| !l.trim().is_empty()).unwrap_or("")
+                );
+            }
             if let Some(crossing) = &show.crossing {
                 caption += &format!("  ·  ↦ {}", crossing.kind.name());
             }
@@ -405,7 +462,7 @@ fn change(show: &mut Show, effects: &mut Layers, fonts: &SystemFonts, area: rata
         return;
     };
     let mut next = Show::next_act(&from.act, fonts);
-    if fastrand::f32() < 0.8 {
+    if fastrand::f32() < 0.65 {
         next.look = from.act.look;
         let to = Stage::new(next, area.width, area.height, cell_ratio());
         let kind = pick(KINDS, None).unwrap_or(transition::Kind::Morph);

@@ -12,14 +12,42 @@ pub enum Backdrop {
     Aurora,
     /// Sunbeams turning slowly around the centre.
     Rays,
+    /// A Julia set drifting through its family.
+    Julia,
+    /// A zoom into the Mandelbrot set's seahorse valley.
+    Mandelbrot,
+    /// The Burning Ship fractal.
+    Ship,
+    /// Newton's fractal for z^3 = 1, turning.
+    Newton,
+    /// Mirrored noise in eight segments.
+    Kaleidoscope,
+    /// A checkered tunnel rushing past.
+    Tunnel,
+    /// Stars streaking past at warp speed.
+    Warp,
+    /// A ray-marched Mandelbulb, slowly orbited.
+    Mandelbulb,
+    /// Flying through an endless Menger sponge.
+    Menger,
 }
 
+/// In the shader's order (`backdrop.wgsl`).
 pub const BACKDROPS: &[Backdrop] = &[
     Backdrop::Vignette,
     Backdrop::Stars,
     Backdrop::Grid,
     Backdrop::Aurora,
     Backdrop::Rays,
+    Backdrop::Julia,
+    Backdrop::Mandelbrot,
+    Backdrop::Ship,
+    Backdrop::Newton,
+    Backdrop::Kaleidoscope,
+    Backdrop::Tunnel,
+    Backdrop::Warp,
+    Backdrop::Mandelbulb,
+    Backdrop::Menger,
 ];
 
 impl Backdrop {
@@ -30,6 +58,15 @@ impl Backdrop {
             Backdrop::Grid => "grid",
             Backdrop::Aurora => "aurora",
             Backdrop::Rays => "rays",
+            Backdrop::Julia => "julia",
+            Backdrop::Mandelbrot => "mandelbrot",
+            Backdrop::Ship => "burning ship",
+            Backdrop::Newton => "newton",
+            Backdrop::Kaleidoscope => "kaleidoscope",
+            Backdrop::Tunnel => "tunnel",
+            Backdrop::Warp => "warp",
+            Backdrop::Mandelbulb => "mandelbulb",
+            Backdrop::Menger => "menger",
         }
     }
 }

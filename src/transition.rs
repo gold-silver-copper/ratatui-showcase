@@ -51,6 +51,8 @@ pub enum Kind {
     Vortex,
     /// The old art crumbles like sand; the new rises up.
     Crumble,
+    /// The old shape melts into the new one.
+    Melt,
 }
 
 pub const KINDS: &[Kind] = &[
@@ -75,6 +77,8 @@ pub const KINDS: &[Kind] = &[
     Kind::Pour,
     Kind::Vortex,
     Kind::Crumble,
+    Kind::Melt,
+    Kind::Melt,
 ];
 
 impl Kind {
@@ -101,6 +105,7 @@ impl Kind {
             Kind::Pour => "pour",
             Kind::Vortex => "vortex",
             Kind::Crumble => "crumble",
+            Kind::Melt => "melt",
         }
     }
 
@@ -112,6 +117,7 @@ impl Kind {
             Kind::Burn | Kind::Swirl | Kind::Ripple => 2.2,
             Kind::Morph | Kind::Vortex | Kind::Scatter => 2.8,
             Kind::Swarm | Kind::Pour | Kind::Crumble => 3.2,
+            Kind::Melt => 2.6,
         }
     }
 
@@ -223,9 +229,26 @@ impl Crossing {
             | Kind::Scatter
             | Kind::Pour
             | Kind::Vortex
-            | Kind::Crumble => sources.saturating_add(targets),
+            | Kind::Crumble
+            | Kind::Melt => sources.saturating_add(targets),
         };
         (data, threads)
+    }
+}
+
+/// Places in `stage`'s art for up to `max` swarm particles to settle, as
+/// `x, y, seed` floats.
+pub fn homes(stage: &Stage, max: usize) -> Vec<u32> {
+    let mut grain = 2.0;
+    loop {
+        let found = points(stage, grain);
+        if found.len() <= max || grain > 64.0 {
+            return found
+                .iter()
+                .flat_map(|p| [p.x, p.y, p.seed].map(f32::to_bits))
+                .collect();
+        }
+        grain += 1.0;
     }
 }
 
