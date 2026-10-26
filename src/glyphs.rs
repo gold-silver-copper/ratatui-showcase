@@ -1,6 +1,6 @@
 //! Picking the block glyph whose shape best matches a cell's coverage.
 //!
-//! The shader does the matching (`render.wgsl`); this builds the table.
+//! The shader does the matching (`encode.wgsl`); this builds the table.
 //! A cell is sampled on a 4x8 grid; bit `row * 4 + col` is set where the art
 //! covers that sample. Each candidate glyph gets the same kind of mask, and
 //! the nearest one by Hamming distance wins. Edges then land on sub-cell
@@ -37,6 +37,8 @@ impl GlyphSet {
 
 pub struct Glyphs {
     table: Vec<(u32, char)>,
+    /// Printable ASCII, for the look that draws with letters.
+    ascii: Vec<(u32, char)>,
 }
 
 impl Glyphs {
@@ -130,7 +132,21 @@ impl Glyphs {
             }
         }
 
-        Self { table }
+        Self {
+            table,
+            ascii: ascii(),
+        }
+    }
+
+    pub fn pack_ascii(&self) -> Vec<u32> {
+        self.ascii
+            .iter()
+            .flat_map(|&(mask, c)| [mask, u32::from(c)])
+            .collect()
+    }
+
+    pub fn ascii_len(&self) -> u32 {
+        num::u32_of(self.ascii.len())
     }
 
     /// The table for the GPU: each glyph's mask, then its code point.
@@ -154,6 +170,32 @@ impl Glyphs {
             .min_by_key(|&&(m, _)| (m ^ mask).count_ones())
             .map_or((' ', 0), |&(m, c)| (c, m))
     }
+}
+
+/// Printable ASCII shapes from the 8x8 font: each pair of font columns
+/// becomes one of the grid's four. Shapes that look the same keep the first.
+fn ascii() -> Vec<(u32, char)> {
+    use font8x8::UnicodeFonts;
+    let mut table: Vec<(u32, char)> = vec![(0, ' ')];
+    for c in (0x21_u8..0x7f).map(char::from) {
+        let Some(glyph) = font8x8::BASIC_FONTS.get(c) else {
+            continue;
+        };
+        let mask = glyph.iter().enumerate().fold(0, |mask, (row, &bits)| {
+            (0..COLS).fold(mask, |mask, col| {
+                let pair = (u32::from(bits) >> col.saturating_mul(2)) & 0b11;
+                if pair != 0 {
+                    set(mask, row.saturating_mul(COLS).saturating_add(col))
+                } else {
+                    mask
+                }
+            })
+        });
+        if !table.iter().any(|&(m, _)| m == mask) {
+            table.push((mask, c));
+        }
+    }
+    table
 }
 
 /// Whether bit `index` of `mask` is set.
@@ -216,6 +258,18 @@ mod tests {
         assert!(
             (m ^ diagonal).count_ones() < (blocks ^ diagonal).count_ones(),
             "{c:?}"
+        );
+    }
+
+    #[test]
+    fn ascii_shapes_are_distinct_and_printable() {
+        let glyphs = Glyphs::new(GlyphSet::Blocks);
+        assert!(glyphs.ascii.len() > 60);
+        assert!(
+            glyphs
+                .ascii
+                .iter()
+                .all(|&(_, c)| c == ' ' || c.is_ascii_graphic())
         );
     }
 

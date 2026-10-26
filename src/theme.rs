@@ -179,6 +179,14 @@ pub enum Shader {
     Fire,
     /// Candy stripes marching diagonally.
     Stripes,
+    /// Veined marble.
+    Marble,
+    /// Flowing lava with glowing cracks.
+    Lava,
+    /// Gold leaf with moving highlights.
+    Gold,
+    /// Sparkling glitter.
+    Glitter,
 }
 
 pub const SHADERS: &[Shader] = &[
@@ -192,6 +200,10 @@ pub const SHADERS: &[Shader] = &[
     Shader::Holo,
     Shader::Fire,
     Shader::Stripes,
+    Shader::Marble,
+    Shader::Lava,
+    Shader::Gold,
+    Shader::Glitter,
 ];
 
 impl Shader {
@@ -207,6 +219,10 @@ impl Shader {
             Shader::Holo => "holo",
             Shader::Fire => "fire",
             Shader::Stripes => "stripes",
+            Shader::Marble => "marble",
+            Shader::Lava => "lava",
+            Shader::Gold => "gold",
+            Shader::Glitter => "glitter",
         }
     }
 }

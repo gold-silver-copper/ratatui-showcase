@@ -14,8 +14,10 @@ bytemuck = "1.25.2"
 fastrand = "2.5.0"
 font8x8 = "0.3.1"
 fontdb = "0.24.0"
+naga = { version = "30.0.1", features = ["wgsl-in", "spv-out"] }
 ratatui = "0.30.2"
 tachyonfx = { version = "0.25.2", features = ["sendable"] }
+wgpu = { version = "30.0.1", default-features = false }
 
 [profile.dev]
 opt-level = 1
@@ -64,5 +66,3 @@ cast_sign_loss = "forbid"
 arithmetic_side_effects = "forbid"
 disallowed_methods = "forbid"
 
-[dev-dependencies]
-naga = { version = "30.0.1", features = ["wgsl-in"] }

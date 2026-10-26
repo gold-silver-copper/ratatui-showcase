@@ -22,8 +22,17 @@ pub enum Material {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Style {
     Solid,
+    /// Just the rim, drawn from the distance field on the GPU.
     Outline,
+    /// A glowing tube along the rim.
+    Neon,
+    /// Lit, bevelled edges.
+    Bevel,
+    /// A soft drop shadow.
+    Shadow,
+    /// 3D block letters, built into the bitmap.
     Extrude,
+    /// A fading mirror image below, built into the bitmap.
     Reflect,
 }
 
@@ -31,16 +40,32 @@ pub const STYLES: &[Style] = &[
     Style::Solid,
     Style::Solid,
     Style::Outline,
+    Style::Neon,
+    Style::Bevel,
+    Style::Bevel,
+    Style::Shadow,
     Style::Extrude,
     Style::Reflect,
 ];
 
 impl Style {
+    /// Every style once (`ST_*`).
+    pub const ALL: &[Style] = &[
+        Style::Solid,
+        Style::Outline,
+        Style::Neon,
+        Style::Bevel,
+        Style::Shadow,
+        Style::Extrude,
+        Style::Reflect,
+    ];
+
     /// The share of the layout box the plain art may use, leaving room for
     /// what the style adds.
     pub fn reserve(self) -> (f32, f32) {
         match self {
-            Style::Solid | Style::Outline => (1.0, 1.0),
+            Style::Solid | Style::Outline | Style::Neon | Style::Bevel => (1.0, 1.0),
+            Style::Shadow => (0.95, 0.9),
             Style::Extrude => (0.93, 0.86),
             Style::Reflect => (1.0, 0.64),
         }
@@ -48,13 +73,23 @@ impl Style {
 
     pub fn apply(self, bitmap: Bitmap) -> Bitmap {
         match self {
-            Style::Solid => bitmap,
-            Style::Outline => bitmap.outline((bitmap.height / 14).max(2)),
+            Style::Solid | Style::Outline | Style::Neon | Style::Bevel | Style::Shadow => bitmap,
             Style::Extrude => {
                 let depth = (bitmap.height / 9).max(2);
                 bitmap.extrude(depth)
             }
             Style::Reflect => bitmap.reflect(),
+        }
+    }
+
+    /// The style's number in the shader; bitmap styles draw as solid.
+    pub fn code(self) -> u32 {
+        match self {
+            Style::Solid | Style::Extrude | Style::Reflect => 0,
+            Style::Outline => 1,
+            Style::Neon => 2,
+            Style::Bevel => 3,
+            Style::Shadow => 4,
         }
     }
 }
@@ -149,65 +184,6 @@ impl Bitmap {
         out
     }
 
-    /// Ink coverage blurred by `radius`, padded by `radius` on every side.
-    /// Used for the neon glow around the art.
-    pub fn glow(&self, radius: usize) -> Bitmap {
-        let mut padded = Self::new(
-            self.width.saturating_add(radius.saturating_mul(2)),
-            self.height.saturating_add(radius.saturating_mul(2)),
-            self.aspect,
-        );
-        for y in 0..self.height {
-            for x in 0..self.width {
-                padded.set(
-                    x.saturating_add(radius),
-                    y.saturating_add(radius),
-                    self.get(x, y),
-                );
-            }
-        }
-        // Two separable box blurs approximate a gaussian.
-        for _ in 0..2 {
-            padded = padded.box_blur(radius, true).box_blur(radius, false);
-        }
-        padded
-    }
-
-    /// Only the rim of the shape, `width` pixels thick.
-    fn outline(&self, width: usize) -> Bitmap {
-        let mut out = Self::new(self.width, self.height, self.aspect);
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let px = self.get(x, y);
-                if px.ink <= 0.0 {
-                    continue;
-                }
-                let inside = [(width, 0), (0, width)]
-                    .iter()
-                    .flat_map(|&(dx, dy)| {
-                        [
-                            (x.checked_sub(dx), y.checked_sub(dy)),
-                            (x.checked_add(dx), y.checked_add(dy)),
-                        ]
-                    })
-                    .map(|(nx, ny)| match (nx, ny) {
-                        (Some(nx), Some(ny)) => self.get(nx, ny).ink,
-                        _ => 0.0,
-                    })
-                    .fold(1.0_f32, f32::min);
-                out.set(
-                    x,
-                    y,
-                    Px {
-                        ink: px.ink * (1.0 - inside),
-                        ..px
-                    },
-                );
-            }
-        }
-        out
-    }
-
     /// 3D lettering: the face over `depth` receding layers.
     fn extrude(&self, depth: usize) -> Bitmap {
         let mut out = Self::new(
@@ -271,43 +247,6 @@ impl Bitmap {
                         material,
                     },
                 );
-            }
-        }
-        out
-    }
-
-    fn box_blur(&self, radius: usize, horizontal: bool) -> Self {
-        let mut out = Self::new(self.width, self.height, self.aspect);
-        let span = num::float(radius) * 2.0 + 1.0;
-        let (outer, inner) = if horizontal {
-            (self.height, self.width)
-        } else {
-            (self.width, self.height)
-        };
-        let at = |o: usize, i: usize| if horizontal { (i, o) } else { (o, i) };
-        for o in 0..outer {
-            let mut sum = 0.0;
-            for i in 0..=radius.min(inner.saturating_sub(1)) {
-                let (x, y) = at(o, i);
-                sum += self.get(x, y).ink;
-            }
-            for i in 0..inner {
-                let (x, y) = at(o, i);
-                out.set(
-                    x,
-                    y,
-                    Px {
-                        ink: sum / span,
-                        material: Material::Ink,
-                    },
-                );
-                let ahead = i.saturating_add(radius).saturating_add(1);
-                if let Some(add) = (ahead < inner).then(|| at(o, ahead)) {
-                    sum += self.get(add.0, add.1).ink;
-                }
-                if let Some(sub) = i.checked_sub(radius).map(|j| at(o, j)) {
-                    sum -= self.get(sub.0, sub.1).ink;
-                }
             }
         }
         out

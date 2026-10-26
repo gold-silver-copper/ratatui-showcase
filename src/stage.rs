@@ -2,17 +2,17 @@
 //!
 //! Positions are in sub-cell samples: each cell is `COLS` x `ROWS` of them.
 
-use std::f32::consts::TAU;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ratatui::layout::Position;
 
-use crate::art::{self, Bitmap, Material, Px, Style};
+use crate::art::{self, Bitmap, Material, Style};
 use crate::backdrop::{BACKDROPS, Backdrop};
 use crate::fonts::{self, Face};
 use crate::glyphs::{COLS, ROWS};
 use crate::num;
+use crate::params::{BLOCK, PIECE_LEN, S};
 use crate::theme::{Rgb, SHADERS, Shader, THEMES, Theme};
 
 pub const WORDMARK: &str = "ratatui";
@@ -52,9 +52,14 @@ pub enum Look {
     Ascii,
     /// An LED sign.
     Led,
+    /// ASCII characters matched to each cell's shape.
+    Shapes,
+    /// Falling code, lit by the picture.
+    Code,
 }
 
 pub const LOOKS: &[Look] = &[
+    Look::Smooth,
     Look::Smooth,
     Look::Smooth,
     Look::Smooth,
@@ -63,18 +68,24 @@ pub const LOOKS: &[Look] = &[
     Look::Braille,
     Look::Ascii,
     Look::Led,
+    Look::Shapes,
+    Look::Code,
 ];
 
 impl Look {
-    /// The look's number in the shader.
+    /// Every look once, in the shader's order (`L_*`).
+    pub const ALL: &[Look] = &[
+        Look::Smooth,
+        Look::Pixels,
+        Look::Braille,
+        Look::Ascii,
+        Look::Led,
+        Look::Shapes,
+        Look::Code,
+    ];
+
     pub fn code(self) -> u32 {
-        match self {
-            Look::Smooth => 0,
-            Look::Pixels => 1,
-            Look::Braille => 2,
-            Look::Ascii => 3,
-            Look::Led => 4,
-        }
+        code(Self::ALL, self)
     }
 
     pub fn name(self) -> &'static str {
@@ -84,6 +95,152 @@ impl Look {
             Look::Braille => "braille",
             Look::Ascii => "ascii",
             Look::Led => "led",
+            Look::Shapes => "shapes",
+            Look::Code => "code",
+        }
+    }
+}
+
+/// How a scene draws its art.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Flat, in its style.
+    Flat,
+    /// A solid, turning in 3D.
+    Turntable,
+    /// Dye in a swirling fluid.
+    Fluid,
+    /// Coral growing by reaction-diffusion.
+    Reaction,
+    /// The Game of Life, seeded by the letters.
+    Life,
+    /// Burning.
+    Fire,
+    /// Under rippling water.
+    Ripple,
+    /// A swarm of particles.
+    Swarm,
+}
+
+pub const MODES: &[Mode] = &[
+    Mode::Flat,
+    Mode::Flat,
+    Mode::Flat,
+    Mode::Flat,
+    Mode::Turntable,
+    Mode::Turntable,
+    Mode::Fluid,
+    Mode::Reaction,
+    Mode::Life,
+    Mode::Fire,
+    Mode::Ripple,
+    Mode::Swarm,
+];
+
+impl Mode {
+    /// Every mode once, in the shader's order (`M_*`).
+    pub const ALL: &[Mode] = &[
+        Mode::Flat,
+        Mode::Turntable,
+        Mode::Fluid,
+        Mode::Reaction,
+        Mode::Life,
+        Mode::Fire,
+        Mode::Ripple,
+        Mode::Swarm,
+    ];
+
+    pub fn code(self) -> u32 {
+        code(Self::ALL, self)
+    }
+
+    /// Whether the mode runs a simulation on the grid.
+    pub fn simulates(self) -> bool {
+        match self {
+            Mode::Fluid | Mode::Reaction | Mode::Life | Mode::Fire | Mode::Ripple => true,
+            Mode::Flat | Mode::Turntable | Mode::Swarm => false,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Flat => "flat",
+            Mode::Turntable => "3d",
+            Mode::Fluid => "fluid",
+            Mode::Reaction => "coral",
+            Mode::Life => "life",
+            Mode::Fire => "fire",
+            Mode::Ripple => "water",
+            Mode::Swarm => "swarm",
+        }
+    }
+}
+
+/// Post-processing over the whole frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Post {
+    Clean,
+    Bloom,
+    /// Moving things leave trails.
+    Trails,
+    /// Each frame echoes inward, like a tunnel of itself.
+    Echo,
+    /// Colour fringes toward the edges, like a cheap lens.
+    Chroma,
+    /// A curved, glowing CRT.
+    Crt,
+    /// Film grain.
+    Grain,
+    /// Shafts of light streaming out from the art.
+    Rays,
+}
+
+pub const POSTS: &[Post] = &[
+    Post::Clean,
+    Post::Clean,
+    Post::Bloom,
+    Post::Bloom,
+    Post::Trails,
+    Post::Echo,
+    Post::Chroma,
+    Post::Crt,
+    Post::Grain,
+    Post::Rays,
+    Post::Rays,
+];
+
+impl Post {
+    /// Every effect once, in the shader's order (`P_*`).
+    pub const ALL: &[Post] = &[
+        Post::Clean,
+        Post::Bloom,
+        Post::Trails,
+        Post::Echo,
+        Post::Chroma,
+        Post::Crt,
+        Post::Grain,
+        Post::Rays,
+    ];
+
+    pub fn code(self) -> u32 {
+        code(Self::ALL, self)
+    }
+
+    /// Whether the effect adds bloom, so the bloom passes must run.
+    pub fn blooms(self) -> bool {
+        self != Post::Clean
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Post::Clean => "clean",
+            Post::Bloom => "bloom",
+            Post::Trails => "trails",
+            Post::Echo => "echo",
+            Post::Chroma => "chroma",
+            Post::Crt => "crt",
+            Post::Grain => "grain",
+            Post::Rays => "rays",
         }
     }
 }
@@ -96,6 +253,21 @@ pub enum Idle {
     Wave,
     Breathe,
     Sway,
+    /// Letters hop one after another.
+    Bounce,
+}
+
+impl Idle {
+    pub fn name(self) -> &'static str {
+        match self {
+            Idle::Still => "still",
+            Idle::Float => "float",
+            Idle::Wave => "wave",
+            Idle::Breathe => "breathe",
+            Idle::Sway => "sway",
+            Idle::Bounce => "bounce",
+        }
+    }
 }
 
 pub const IDLES: &[Idle] = &[
@@ -104,6 +276,7 @@ pub const IDLES: &[Idle] = &[
     Idle::Wave,
     Idle::Breathe,
     Idle::Sway,
+    Idle::Bounce,
 ];
 
 /// Everything that makes one scene look the way it does.
@@ -116,6 +289,10 @@ pub struct Act {
     pub look: Look,
     pub style: Style,
     pub idle: Idle,
+    pub mode: Mode,
+    pub post: Post,
+    /// Picks among a mode's or background's presets.
+    pub variant: u32,
 }
 
 impl Act {
@@ -154,7 +331,7 @@ const FALLBACK: Theme = Theme {
 
 struct Piece {
     bitmap: Bitmap,
-    glow: Bitmap,
+    /// How far the glow reaches, in samples.
     glow_radius: f32,
     x: f32,
     y: f32,
@@ -162,12 +339,10 @@ struct Piece {
 
 impl Piece {
     fn new(bitmap: Bitmap, x: f32, y: f32) -> Self {
-        let glow_radius = (bitmap.height / 18).clamp(2, 24);
-        let glow = bitmap.glow(glow_radius);
+        let glow_radius = num::float((bitmap.height / 10).clamp(3, 48));
         Self {
             bitmap,
-            glow,
-            glow_radius: glow_radius as f32,
+            glow_radius,
             x,
             y,
         }
@@ -180,36 +355,25 @@ impl Piece {
     fn height(&self) -> f32 {
         self.bitmap.height as f32
     }
-
-    /// Where screen position `(x, y)` lands on the bitmap at time `t`.
-    fn local(&self, idle: Idle, amplitude: f32, x: f32, y: f32, t: f32) -> (f32, f32) {
-        let (mut lx, mut ly) = (x - self.x, y - self.y);
-        let (cx, cy) = (self.width() / 2.0, self.height() / 2.0);
-        match idle {
-            Idle::Still => {}
-            Idle::Float => ly -= amplitude * (t * 0.9).sin(),
-            Idle::Wave => {
-                ly -= amplitude * (lx / self.width().max(1.0) * TAU * 0.9 - t * 2.2).sin()
-            }
-            Idle::Breathe => {
-                let scale = 1.0 + 0.035 * (t * 1.2).sin();
-                lx = cx + (lx - cx) / scale;
-                ly = cy + (ly - cy) / scale;
-            }
-            Idle::Sway => {
-                let (sin, cos) = (0.04 * (t * 0.7).sin()).sin_cos();
-                let (dx, dy) = (lx - cx, ly - cy);
-                lx = cx + dx * cos + dy * sin;
-                ly = cy - dx * sin + dy * cos;
-            }
-        }
-        (lx, ly)
-    }
 }
 
-/// Which cells hold part of the art, for effects that treat it specially.
-/// Words in a scene's settings block for the GPU.
-pub const BLOCK: usize = 64;
+/// Which letter each column of `bitmap` belongs to: letters are runs of
+/// columns with ink, split by empty ones.
+fn letters(bitmap: &Bitmap) -> Vec<u8> {
+    let mut letter = 0_u8;
+    let mut inside = false;
+    (0..bitmap.width)
+        .map(|x| {
+            let ink = (0..bitmap.height).any(|y| bitmap.get(x, y).ink > 0.5);
+            if ink && !inside {
+                letter = letter.wrapping_add(1);
+            }
+            inside = ink;
+            letter
+        })
+        .collect()
+}
+
 const MAX_PIECES: usize = 2;
 const MAX_STOPS: usize = 5;
 
@@ -343,7 +507,7 @@ impl Stage {
                 cells.push((0..ROWS).any(|row| {
                     (0..COLS).any(|col| {
                         let (x, y) = (x0 + num::float(col) + 0.5, y0 + num::float(row) + 0.5);
-                        self.coverage(x, y, 0.0) > 0.5
+                        self.coverage(x, y) > 0.5
                     })
                 }));
             }
@@ -371,12 +535,13 @@ impl Stage {
         )
     }
 
-    /// How much of the art covers screen position `(x, y)`.
-    pub fn coverage(&self, x: f32, y: f32, t: f32) -> f32 {
+    /// How much of the art at rest covers screen position `(x, y)`. The GPU
+    /// moves it while it holds (`art.wgsl`).
+    pub fn coverage(&self, x: f32, y: f32) -> f32 {
         self.pieces
             .iter()
             .map(|piece| {
-                let (lx, ly) = piece.local(self.act.idle, self.amplitude, x, y, t);
+                let (lx, ly) = (x - piece.x, y - piece.y);
                 if lx < 0.0 || ly < 0.0 {
                     return 0.0;
                 }
@@ -388,19 +553,16 @@ impl Stage {
             .fold(0.0, f32::max)
     }
 
-    /// The art for the GPU: per pixel of each piece's glow-padded grid, its
-    /// ink (bits 0-7), material (8-15), material parameter (16-23) and glow
-    /// (24-31). Pieces follow each other.
+    /// The art for the GPU: each piece's pixels in turn, with ink in bits
+    /// 0-7, material in 8-15, its parameter in 16-23 and which letter the
+    /// column belongs to in 24-31.
     pub fn texels(&self) -> Vec<u32> {
-        let mut texels = Vec::new();
+        let mut texels = Vec::with_capacity(self.texels_len());
         for piece in &self.pieces {
-            let r = num::floor_usize(piece.glow_radius);
-            for gy in 0..piece.glow.height {
-                for gx in 0..piece.glow.width {
-                    let px = match (gx.checked_sub(r), gy.checked_sub(r)) {
-                        (Some(x), Some(y)) => piece.bitmap.get(x, y),
-                        _ => Px::default(),
-                    };
+            let letters = letters(&piece.bitmap);
+            for y in 0..piece.bitmap.height {
+                for (x, &letter) in (0..piece.bitmap.width).zip(&letters) {
+                    let px = piece.bitmap.get(x, y);
                     let (material, param) = match px.material {
                         Material::Ink => (0, 0),
                         Material::Hat => (1, 0),
@@ -412,8 +574,9 @@ impl Stage {
                         Material::Reflection(f) => (7, f),
                     };
                     let ink = u32::from(num::round_u8(px.ink * 255.0));
-                    let glow = u32::from(num::round_u8(piece.glow.get(gx, gy).ink * 255.0));
-                    texels.push(ink | material << 8 | u32::from(param) << 16 | glow << 24);
+                    texels.push(
+                        ink | material << 8 | u32::from(param) << 16 | u32::from(letter) << 24,
+                    );
                 }
             }
         }
@@ -423,7 +586,7 @@ impl Stage {
     pub fn texels_len(&self) -> usize {
         self.pieces
             .iter()
-            .map(|p| p.glow.width.saturating_mul(p.glow.height))
+            .map(|p| p.bitmap.width.saturating_mul(p.bitmap.height))
             .sum()
     }
 
@@ -432,59 +595,73 @@ impl Stage {
         f32::from(self.cols) / (f32::from(self.rows.max(1)) * self.cell_ratio)
     }
 
-    /// This scene's settings for the GPU (see `render.wgsl`), with its art
-    /// starting at `art` in the art buffer.
-    pub fn block(&self, art: u32) -> [u32; BLOCK] {
+    /// This scene's settings for the GPU (`params::S`), with its art
+    /// starting at `art` in the art section and `age` seconds since it began.
+    pub fn block(&self, art: u32, age: f32) -> [u32; BLOCK] {
         let mut block = [0; BLOCK];
         let theme = self.act.theme();
-        let put = |block: &mut [u32; BLOCK], at: usize, value: u32| {
+        let mut put = |at: usize, value: u32| {
             if let Some(slot) = block.get_mut(at) {
                 *slot = value;
             }
         };
-        let rgb = |block: &mut [u32; BLOCK], at: usize, c: Rgb| {
-            for (i, v) in [c.0, c.1, c.2].into_iter().enumerate() {
-                put(block, at.saturating_add(i), v.to_bits());
-            }
-        };
-        put(&mut block, 0, code(SHADERS, self.act.shader));
-        put(&mut block, 1, code(BACKDROPS, self.act.backdrop));
-        put(&mut block, 2, code(IDLES, self.act.idle));
-        put(&mut block, 3, self.amplitude.to_bits());
+        put(S::Shader.at(), code(SHADERS, self.act.shader));
+        put(S::Backdrop.at(), code(BACKDROPS, self.act.backdrop));
+        put(S::Idle.at(), code(IDLES, self.act.idle));
+        put(S::Amplitude.at(), self.amplitude.to_bits());
         put(
-            &mut block,
-            4,
+            S::Pieces.at(),
             num::u32_of(self.pieces.len().min(MAX_PIECES)),
         );
-        put(&mut block, 5, num::u32_of(theme.stops.len().min(MAX_STOPS)));
-        rgb(&mut block, 8, theme.background);
-        rgb(&mut block, 11, theme.accent);
-        for (i, &stop) in theme.stops.iter().take(MAX_STOPS).enumerate() {
-            rgb(
-                &mut block,
-                14_usize.saturating_add(i.saturating_mul(3)),
-                Rgb::hex(stop),
-            );
+        put(S::Stops.at(), num::u32_of(theme.stops.len().min(MAX_STOPS)));
+        put(S::Mode.at(), self.act.mode.code());
+        put(S::Style.at(), self.act.style.code());
+        let colors = [theme.background, theme.accent]
+            .into_iter()
+            .chain(theme.stops.iter().take(MAX_STOPS).map(|&h| Rgb::hex(h)));
+        let channels = colors.flat_map(|c| [c.0, c.1, c.2]);
+        for (i, v) in channels.enumerate() {
+            put(S::Background.at().saturating_add(i), v.to_bits());
         }
+        let tallest = self
+            .pieces
+            .iter()
+            .map(|p| p.bitmap.height)
+            .max()
+            .unwrap_or(0);
+        put(S::Age.at(), age.to_bits());
+        put(S::Variant.at(), self.act.variant);
+        put(
+            S::Width.at(),
+            num::float((tallest / 14).clamp(2, 24)).to_bits(),
+        );
+        put(
+            S::Glow.at(),
+            self.pieces
+                .iter()
+                .map(|p| p.glow_radius)
+                .fold(1.0, f32::max)
+                .to_bits(),
+        );
         let mut offset = art;
         for (i, piece) in self.pieces.iter().take(MAX_PIECES).enumerate() {
-            let at = 32_usize.saturating_add(i.saturating_mul(8));
+            let at = S::Piece0.at().saturating_add(i.saturating_mul(PIECE_LEN));
+            let (w, h) = (
+                num::u32_of(piece.bitmap.width),
+                num::u32_of(piece.bitmap.height),
+            );
             let fields = [
                 piece.x.to_bits(),
                 piece.y.to_bits(),
-                num::u32_of(piece.bitmap.width),
-                num::u32_of(piece.bitmap.height),
-                num::floor_u32(piece.glow_radius),
+                w,
+                h,
+                piece.glow_radius.to_bits(),
                 offset,
-                num::u32_of(piece.glow.width),
-                num::u32_of(piece.glow.height),
             ];
             for (j, value) in fields.into_iter().enumerate() {
-                put(&mut block, at.saturating_add(j), value);
+                put(at.saturating_add(j), value);
             }
-            offset = offset.saturating_add(num::u32_of(
-                piece.glow.width.saturating_mul(piece.glow.height),
-            ));
+            offset = offset.saturating_add(w.saturating_mul(h));
         }
         block
     }
@@ -508,6 +685,9 @@ mod tests {
             look: Look::Smooth,
             style: Style::Solid,
             idle: Idle::Still,
+            mode: Mode::Flat,
+            post: Post::Clean,
+            variant: 0,
         }
     }
 
