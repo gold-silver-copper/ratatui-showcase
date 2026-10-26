@@ -16,7 +16,9 @@ const SKIP: &[&str] = &[
 #[derive(Resource)]
 pub struct SystemFonts {
     db: fontdb::Database,
-    faces: Vec<fontdb::ID>,
+    /// Faces by family, so a family with many files (Noto has one per
+    /// script) is picked no more often than one with a single file.
+    families: Vec<Vec<fontdb::ID>>,
 }
 
 #[derive(Clone)]
@@ -29,6 +31,7 @@ impl SystemFonts {
     pub fn load() -> Self {
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
+        let mut families: Vec<(String, Vec<fontdb::ID>)> = Vec::new();
         let faces = db
             .faces()
             // Hairline weights vanish on a projector.
@@ -39,15 +42,26 @@ impl SystemFonts {
                     !SKIP.iter().any(|skip| family.contains(skip))
                 })
             })
-            .map(|face| face.id)
-            .collect();
-        Self { db, faces }
+            .map(|face| (family_of(face), face.id));
+        for (name, id) in faces {
+            match families.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, ids)) => ids.push(id),
+                None => families.push((name, vec![id])),
+            }
+        }
+        Self {
+            db,
+            families: families.into_iter().map(|(_, ids)| ids).collect(),
+        }
     }
 
     /// A random installed face that can draw `text`.
     pub fn pick(&self, text: &str) -> Option<Face> {
         (0..32).find_map(|_| {
-            let id = *self.faces.get(fastrand::usize(..self.faces.len().max(1)))?;
+            let family = self
+                .families
+                .get(fastrand::usize(..self.families.len().max(1)))?;
+            let id = *family.get(fastrand::usize(..family.len().max(1)))?;
             // Check the glyphs on the borrowed file; copy only the one used.
             let font = self.db.with_face_data(id, |data, index| {
                 let borrowed = FontRef::try_from_slice_and_index(data, index).ok()?;
@@ -63,6 +77,19 @@ impl SystemFonts {
                 font: Arc::new(font),
             })
         })
+    }
+}
+
+/// The face's family as it looks in Latin: script variants such as
+/// "Noto Sans Adlam" or "Noto Serif CJK JP" draw their Latin letters from the
+/// same design as "Noto Sans" or "Noto Serif".
+fn family_of(face: &fontdb::FaceInfo) -> String {
+    let name = face.families.first().map_or("", |(name, _)| name.as_str());
+    let words: Vec<&str> = name.split_whitespace().collect();
+    match words.as_slice() {
+        ["Noto", kind, "Mono", ..] => format!("Noto {kind} Mono"),
+        ["Noto", kind, ..] => format!("Noto {kind}"),
+        _ => name.to_owned(),
     }
 }
 
