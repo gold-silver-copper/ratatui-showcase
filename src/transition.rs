@@ -167,7 +167,8 @@ impl Kind {
         }
     }
 
-    fn duration(self) -> f32 {
+    /// About how long it takes, in seconds; it plays for whole beats.
+    pub fn duration(self) -> f32 {
         match self {
             Kind::Wipe(_) => 1.8,
             Kind::Glitch | Kind::Crt => 1.6,
@@ -236,6 +237,8 @@ pub struct Crossing {
     pub kind: Kind,
     pub from: Stage,
     elapsed: f32,
+    /// Seconds it plays for.
+    duration: f32,
     /// Particle size in samples.
     pub grain: f32,
     sources: Vec<Point>,
@@ -246,7 +249,7 @@ pub struct Crossing {
 const MAX_PARTICLES: usize = 24_000;
 
 impl Crossing {
-    pub fn new(kind: Kind, from: Stage, to: &Stage) -> Self {
+    pub fn new(kind: Kind, from: Stage, to: &Stage, duration: f32) -> Self {
         let mut grain = 2.0;
         let (mut sources, mut targets) = (Vec::new(), Vec::new());
         if kind.particles() {
@@ -271,6 +274,7 @@ impl Crossing {
             kind,
             from,
             elapsed: 0.0,
+            duration: duration.max(0.1),
             grain,
             sources,
             targets,
@@ -282,11 +286,11 @@ impl Crossing {
     }
 
     pub fn done(&self) -> bool {
-        self.elapsed >= self.kind.duration()
+        self.elapsed >= self.duration
     }
 
     pub fn progress(&self) -> f32 {
-        (self.elapsed / self.kind.duration()).clamp(0.0, 1.0)
+        (self.elapsed / self.duration).clamp(0.0, 1.0)
     }
 
     pub fn counts(&self) -> (u32, u32) {

@@ -273,5 +273,11 @@ fn post(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) g
         c += vec3((hash3(sx / 4u, sy / 4u, frame()) - 0.5) * 0.12);
         c *= 1.0 - 0.3 * dot(uv * 0.7, uv * 0.7);
     }
+    // Bloom and the rest spill light around the art: it keeps its contrast.
+    if kind() == K_STILL {
+        let d = sdf(1u, f32(sx) + 0.5, f32(sy) + 0.5);
+        if d > 0.0 { c = legible(H_TO, d, c); }
+    }
     frames[final_index(0u, vec2(f32(sx), f32(sy)))] = pack4x8unorm(vec4(clamp(c, vec3(0.0), vec3(1.0)), 1.0));
+
 }

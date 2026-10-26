@@ -37,11 +37,28 @@ fn water(p: vec2<f32>) -> vec2<f32> {
     return vec2(0.0);
 }
 
-/// Darkening behind the art over busy backgrounds, so it stays readable.
-fn halo(s: u32, layer: u32, x: f32, y: f32) -> f32 {
-    if !busy(s) { return 1.0; }
-    let d = sdf(layer, x, y);
-    return mix(0.3, 1.0, smoothstep(0.0, max(pf(s + S_GLOW), 1.0) * 3.0, d));
+/// Relative luminance: colours here are about the square root of linear
+/// light (see `mixl`).
+fn luminance(c: vec3<f32>) -> f32 { return dot(c * c, vec3(0.2126, 0.7152, 0.0722)); }
+
+/// The contrast the art keeps against what is behind and around it, as a
+/// ratio of luminances: WCAG's minimum for large text.
+const CONTRAST: f32 = 3.0;
+
+/// `bg`, behind or around scene `s`'s art `d` samples from its edge,
+/// dimmed just as far as the art's ink needs to stand out from it by
+/// `CONTRAST`: a dark background is left alone, a bright fractal gets a
+/// dark halo. The post pass checks again after bloom and the rest.
+fn legible(s: u32, d: f32, bg: vec3<f32>) -> vec3<f32> {
+    let reach = max(pf(s + S_GLOW), 1.0) * 3.0;
+    if d > reach { return bg; }
+    let n = clamp(params[s + S_STOPS], 1u, 5u);
+    var ink = 0.0;
+    for (var i = 0u; i < n; i++) { ink += luminance(rgb3(s + S_STOP0 + i * 3u)); }
+    let ceiling = max((ink / f32(n) + 0.05) / CONTRAST - 0.05, 0.003);
+    let l = luminance(bg);
+    if l <= ceiling { return bg; }
+    return bg * mix(sqrt(ceiling / l), 1.0, smoothstep(0.0, reach, d));
 }
 
 @compute @workgroup_size(64)
@@ -79,12 +96,13 @@ fn scene(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) 
         if m > 0.0 {
             bg_new = grid_sample(H_BG_NEW, p).rgb;
             if splatted(H_TO) { bg_new += splat_light(H_TO, p.x, p.y); }
-            bg_new *= halo(H_TO, 1u, p.x, p.y);
+            bg_new = legible(H_TO, sdf(1u, p.x, p.y), bg_new);
         }
         if m < 1.0 {
             bg_old = grid_sample(H_BG_OLD, p).rgb;
             if splatted(H_FROM) && !splatted(H_TO) { bg_old += splat_light(H_FROM, p.x, p.y); }
-            bg_old *= halo(H_FROM, 0u, p.x, p.y);
+            bg_old = legible(H_FROM, sdf(0u, p.x, p.y), bg_old);
+
         }
         base = mixl(bg_old, bg_new, m);
     }

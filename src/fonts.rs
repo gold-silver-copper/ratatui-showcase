@@ -28,6 +28,15 @@ pub struct Face {
 }
 
 impl SystemFonts {
+    /// No fonts at all: the wordmark falls back to the built-in ones.
+    #[cfg(test)]
+    pub fn empty() -> Self {
+        Self {
+            db: fontdb::Database::new(),
+            families: Vec::new(),
+        }
+    }
+
     pub fn load() -> Self {
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
@@ -56,12 +65,10 @@ impl SystemFonts {
     }
 
     /// A random installed face that can draw `text`.
-    pub fn pick(&self, text: &str) -> Option<Face> {
+    pub fn pick(&self, text: &str, rng: &mut fastrand::Rng) -> Option<Face> {
         (0..32).find_map(|_| {
-            let family = self
-                .families
-                .get(fastrand::usize(..self.families.len().max(1)))?;
-            let id = *family.get(fastrand::usize(..family.len().max(1)))?;
+            let family = self.families.get(rng.usize(..self.families.len().max(1)))?;
+            let id = *family.get(rng.usize(..family.len().max(1)))?;
             // Check the glyphs on the borrowed file; copy only the one used.
             let font = self.db.with_face_data(id, |data, index| {
                 let borrowed = FontRef::try_from_slice_and_index(data, index).ok()?;

@@ -403,6 +403,8 @@ pub struct Frame {
     /// Seconds for the shaders' clock, which the caller keeps small enough
     /// for f32 to tell frames apart.
     pub t: f32,
+    /// Beats of the show's tempo, wrapped (`tempo.rs`).
+    pub beat: f32,
     /// Seconds since launch, for scene ages.
     pub now: f64,
     pub dt: f32,
@@ -799,6 +801,7 @@ impl Gpu<'_, '_> {
         put(H::Cols, u32::from(cols));
         put(H::Rows, u32::from(rows));
         put(H::Time, frame.t.to_bits());
+        put(H::Beat, frame.beat.to_bits());
         put(H::Aspect, to.screen_aspect().to_bits());
         put(H::Look, to.act.look.code());
         put(H::Glyphs, glyphs.len());

@@ -33,6 +33,8 @@ slots! {
         Cols,
         Rows,
         Time,
+        /// Beats of the show's tempo, wrapped every 64.
+        Beat,
         /// The screen's width over its height.
         Aspect,
         Look,

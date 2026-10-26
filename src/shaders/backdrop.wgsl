@@ -3,13 +3,12 @@
 
 fn line(v: f32, w: f32) -> f32 { return max(1.0 - abs(wrap(v) - 0.5) * 2.0 / w, 0.0); }
 
-/// Whether a backdrop is busy enough that the art needs a dark halo.
-fn busy(s: u32) -> bool { return params[s + S_BACKDROP] >= B_JULIA; }
-
 /// Screen position as a point on the complex plane, `scale` high.
 fn plane(x: f32, y: f32, centre: vec2<f32>, scale: f32) -> vec2<f32> {
     return centre + vec2((x - 0.5) * pf(H_ASPECT), y - 0.5) * scale;
 }
+
+fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
 
 fn smooth_escape(i: f32, z: vec2<f32>) -> f32 { return i + 1.0 - log2(log2(max(dot(z, z), 1.0001)) * 0.5 + 1e-6); }
 
@@ -21,28 +20,73 @@ fn escape_color(s: u32, mu: f32, limit: f32, t: f32) -> vec3<f32> {
     return sample(s, log2(mu + 1.0) * 0.3 + t * 0.03) * (0.12 + 0.88 * shade);
 }
 
+// ---------------------------------------------------------------- the art as an orbit trap
+
+/// Signed distance in samples from scene `s`'s art at screen sample `p`,
+/// from the jump-flooded field (jfa.wgsl) at the nearest grid point; off
+/// the screen, FAR.
+fn art_field(s: u32, p: vec2<f32>) -> f32 {
+    // Written so NaN fails it too.
+    if !(p.x >= 0.0 && p.y >= 0.0 && p.x < width() && p.y < height()) { return FAR; }
+    let g = state[params[H_FIELD1] + grid_index(u32(p.x * 0.5), u32(p.y * 0.5))];
+    return select(g.x, g.y, s == H_TO);
+}
+
+/// An orbit trap shaped like the art: the screen laid over the plane,
+/// `span` high around `centre`, and how far the orbit point `z` lands from
+/// the art there, in samples (0 on it).
+fn art_trap(s: u32, z: vec2<f32>, centre: vec2<f32>, span: f32) -> f32 {
+    let q = (z - centre) / span;
+    return max(art_field(s, vec2((q.x / pf(H_ASPECT) + 0.5) * width(), (q.y + 0.5) * height())), 0.0);
+}
+
+/// A fractal's colour `c`, lit where its orbits passed through the art:
+/// the copies of the logo or wordmark the fractal itself draws.
+fn trapped(s: u32, c: vec3<f32>, trap: f32, t: f32) -> vec3<f32> {
+    let near = exp(-trap / (height() * 0.02));
+    let ink = lerp(sample(s, 0.5 + t * 0.02), WHITE, 0.25);
+    return mixl(c, ink, near * 0.9);
+}
+
+/// A point walking the Mandelbrot set's boundary for ever: around the main
+/// cardioid, and from its tip at -3/4 once around the period-2 bulb, a
+/// little inside both but on the boundary where they meet, so Julia sets
+/// for it stay connected and change continuously.
+fn boundary_walk(t: f32) -> vec2<f32> {
+    let lap = wrap(t / 160.0) * 4.0;
+    if lap >= 1.5 && lap < 2.5 {
+        let phi = (lap - 1.5) * TAU;
+        let seam = exp(-pow(min(phi, TAU - phi), 2.0) * 20.0);
+        return vec2(-1.0, 0.0) + vec2(cos(phi), sin(phi)) * 0.25 * mix(0.95, 1.0, seam);
+    }
+    let theta = select(lap, lap - 1.0, lap >= 2.5) / 3.0 * TAU;
+    let w = vec2(cos(theta), sin(theta)) * 0.5;
+    let seam = exp(-pow(theta - PI, 2.0) * 20.0);
+    return (w - cmul(w, w)) * mix(0.985, 1.0, seam);
+}
+
 fn julia(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
-    // Along the edge of the Mandelbrot set's main cardioid, where Julia sets
-    // stay connected and full of filigree.
-    let a = t * 0.07;
-    let w = vec2(cos(a), sin(a)) * 0.5;
-    let c = (w - vec2(w.x * w.x - w.y * w.y, 2.0 * w.x * w.y)) * 0.985;
+    let c = boundary_walk(t);
     var z = plane(x, y, vec2(0.0), 2.1);
     let limit = 96.0;
     var i = 0.0;
+    var trap = FAR;
     for (; i < limit; i += 1.0) {
         if dot(z, z) > 16.0 { break; }
-        z = vec2(z.x * z.x - z.y * z.y, 2.0 * z.x * z.y) + c;
+        z = cmul(z, z) + c;
+        // From the first step on: the points whose orbits land on the art
+        // are its preimages, copies bent around the Julia set.
+        if i < 24.0 { trap = min(trap, art_trap(s, z, vec2(0.0, 1.3), 1.0)); }
     }
-    return escape_color(s, select(smooth_escape(i, z), limit, i >= limit), limit, t);
+    // Inside the set the orbit settles, often on the art: only escaping
+    // orbits draw it.
+    return trapped(s, escape_color(s, select(smooth_escape(i, z), limit, i >= limit), limit, t), select(trap, FAR, i >= limit), t);
 }
 
 fn orbit(n: u32) -> vec2<f32> {
     let o = params[H_IN_ORBIT] + min(n, max(params[H_ORBIT_LEN], 1u) - 1u) * 2u;
     return vec2(bitcast<f32>(inputs[o]), bitcast<f32>(inputs[o + 1u]));
 }
-
-fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
 
 /// An endless zoom into seahorse valley, in and back out every few minutes.
 /// f32 can't tell neighbouring pixels apart past about 1e-6, so each pixel
@@ -59,17 +103,27 @@ fn mandelbrot(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
     var m = 0u;
     var i = 0.0;
     var z = vec2(0.0);
+    var trap = FAR;
+    var checks = 0u;
     for (; i < limit; i += 1.0) {
         dz = cmul(2.0 * orbit(m) + dz, dz) + dc;
         m += 1u;
         z = orbit(m) + dz;
         if dot(z, z) > 16.0 { break; }
+        // Only once this orbit has left its neighbours': before that every
+        // pixel would light alike.
+        if checks < 96u && dot(dz, dz) > 1e-4 {
+            trap = min(trap, art_trap(s, z, vec2(0.0, 1.2), 0.6));
+            checks += 1u;
+        }
         if dot(z, z) < dot(dz, dz) || m + 1u >= params[H_ORBIT_LEN] {
             dz = z;
             m = 0u;
         }
     }
-    return escape_color(s, select(smooth_escape(i, z), limit, i >= limit), limit, t);
+    // Inside the set the orbit settles, often on the art: only escaping
+    // orbits draw it.
+    return trapped(s, escape_color(s, select(smooth_escape(i, z), limit, i >= limit), limit, t), select(trap, FAR, i >= limit), t);
 }
 
 fn burning_ship(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
@@ -84,6 +138,7 @@ fn burning_ship(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
         z = vec2(a.x * a.x - a.y * a.y, -2.0 * a.x * a.y) + c;
     }
     return escape_color(s, select(smooth_escape(i, z), limit, i >= limit), limit, t);
+
 }
 
 fn newton(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
@@ -371,6 +426,7 @@ fn kleinian(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
     let depth = steps / 70.0;
     let glow = pow(depth, 0.6);
     return background(s) * 0.5 + sample(s, depth * 1.7 + t * 0.02) * select(glow * 0.45, glow, hit);
+
 }
 
 /// A hyperbolic {p, q} tiling of the Poincare disk: each point is reflected
@@ -477,22 +533,6 @@ fn fractal_view(s: u32, x: f32, y: f32, t: f32, kind: u32) -> vec3<f32> {
     return sample(s, log(1.0 + trap) * 0.6 + t * 0.02) * (0.12 + 0.88 * pow(occlusion, 1.5));
 }
 
-/// The scene's own art, small, in staggered rows drifting across.
-fn tiles(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
-    if params[s + S_PIECES] == 0u { return background(s); }
-    let p = piece(s, 0u);
-    let tile_w = width() / 5.0;
-    let scale = tile_w / max(p.w, 1.0);
-    let span_x = tile_w * 1.3;
-    let span_y = p.h * scale * 1.5;
-    var q = vec2(x * width() + t * 14.0, y * height() + t * 5.0);
-    let row = floor(q.y / span_y);
-    q.x += row * span_x * 0.5;
-    let local = vec2(wrap(q.x / span_x) * span_x, wrap(q.y / span_y) * span_y) / scale;
-    let ink = f32(texel(p, local) & 0xffu) / 255.0;
-    return background(s) * 0.8 + sample(s, row * 0.13 + floor(q.x / span_x) * 0.07 + t * 0.02) * ink * 0.3;
-}
-
 /// Background at `(x, y)` in 0..1, half-cell pixel `(px, py)`.
 fn backdrop(s: u32, x: f32, y: f32, px: u32, py: u32, t: f32) -> vec3<f32> {
     let aspect = pf(H_ASPECT);
@@ -549,9 +589,8 @@ fn backdrop(s: u32, x: f32, y: f32, px: u32, py: u32, t: f32) -> vec3<f32> {
         case B_HYPERBOLIC: { return hyperbolic(s, x, y, t) * 0.7; }
         case B_COMPLEX: { return domain_colouring(s, x, y, t); }
         case B_MANDELBOX, B_KIFS: { return fractal_view(s, x, y, t, params[s + S_BACKDROP]) * 0.75; }
-        case B_TILES: { return tiles(s, x, y, t); }
         // Flames and attractors are drawn over this from their histogram.
-        case B_FLAME, B_CLIFFORD, B_DE_JONG, B_LORENZ, B_PARTICLE_LIFE: { return background(s) * 0.7 + vec3(dither); }
+        case B_FLAME, B_COLLAGE, B_CLIFFORD, B_DE_JONG, B_LORENZ, B_PARTICLE_LIFE: { return background(s) * 0.7 + vec3(dither); }
         default: { return base; }
     }
 }

@@ -72,6 +72,9 @@ const FAR: f32 = 1e5;
 
 fn pf(i: u32) -> f32 { return bitcast<f32>(params[i]); }
 fn time() -> f32 { return pf(H_TIME); }
+/// Beats of the show's tempo, wrapping every 64: motions in time with it
+/// repeat a whole number of times in 64.
+fn beat() -> f32 { return pf(H_BEAT); }
 fn progress() -> f32 { return pf(H_PROGRESS); }
 fn kind() -> u32 { return params[H_KIND]; }
 fn frame() -> u32 { return params[H_FRAME]; }

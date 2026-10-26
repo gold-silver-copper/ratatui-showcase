@@ -54,10 +54,11 @@ pub enum Backdrop {
     Mandelbox,
     /// A kaleidoscopic IFS: space folded through a polyhedron's mirrors.
     Kifs,
-    /// The scene's own art, small and tiled, drifting.
-    Tiles,
     /// A fractal flame of millions of points.
     Flame,
+    /// The art as an iterated function system of itself (Barnsley's collage
+    /// theorem): copies of the art make up the art, each turning slowly.
+    Collage,
     /// The Clifford attractor, drifting.
     Clifford,
     /// The de Jong attractor, drifting.
@@ -94,8 +95,8 @@ pub const BACKDROPS: &[Backdrop] = &[
     Backdrop::Complex,
     Backdrop::Mandelbox,
     Backdrop::Kifs,
-    Backdrop::Tiles,
     Backdrop::Flame,
+    Backdrop::Collage,
     Backdrop::Clifford,
     Backdrop::DeJong,
     Backdrop::Lorenz,
@@ -108,6 +109,7 @@ impl Backdrop {
         matches!(
             self,
             Backdrop::Flame
+                | Backdrop::Collage
                 | Backdrop::Clifford
                 | Backdrop::DeJong
                 | Backdrop::Lorenz
@@ -141,7 +143,7 @@ impl Backdrop {
             Backdrop::Complex => "domain colouring",
             Backdrop::Mandelbox => "mandelbox",
             Backdrop::Kifs => "kaleidoscopic ifs",
-            Backdrop::Tiles => "tiles",
+            Backdrop::Collage => "collage",
             Backdrop::Flame => "flame",
             Backdrop::Clifford => "clifford",
             Backdrop::DeJong => "de jong",

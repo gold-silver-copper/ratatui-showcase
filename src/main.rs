@@ -15,6 +15,7 @@ mod params;
 mod profile;
 mod shader;
 mod stage;
+mod tempo;
 mod theme;
 mod transition;
 
@@ -35,20 +36,25 @@ use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::terminal::{self, BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use tachyonfx::EffectManager;
 
-use crate::art::Style;
-use crate::backdrop::{BACKDROPS, Backdrop};
+use crate::backdrop::BACKDROPS;
 use crate::director::Director;
 use crate::fonts::SystemFonts;
 use crate::glyphs::{GlyphSet, Glyphs};
-use crate::stage::{Act, IDLES, Idle, LOOKS, Logo, Look, MODES, Mode, POSTS, Post, Stage, Subject};
+use crate::stage::{Act, IDLES, Idle, Look, Mode, Post, Stage};
+use crate::tempo::Tempo;
 use crate::theme::{Palette, SHADERS, Shader};
 use crate::transition::{Crossing, KINDS};
 
 const USAGE: &str = "\
-usage: ratatui-showcase [--hold SECONDS] [--fps N] [--glyphs blocks|sextants|full]
-                        [--watch] [--profile] [--dither]
+usage: ratatui-showcase [--hold SECONDS] [--bpm N] [--seed N] [--fps N]
+                        [--glyphs blocks|sextants|full] [--watch] [--profile] [--dither]
 
-  --hold       how long each scene stays on screen, 0.5 to 86400 (default 7)
+  --hold       how long each scene stays on screen, 0.5 to 86400, rounded to
+               whole bars (default 7: 4 bars at 120 bpm)
+  --bpm        the show's tempo, 40 to 240 (default 120): cuts land on bar
+               lines, transitions last whole beats, motions keep time
+  --seed       the scenes to play; the caption shows it, and the same seed
+               on the same terminal size plays the same scenes again
   --fps        frames per second, 1 to 1000 (default 60)
   --glyphs     block characters the terminal draws well (default full: octants
                and wedges, as in foot, kitty, ghostty and wezterm)
@@ -59,6 +65,8 @@ usage: ratatui-showcase [--hold SECONDS] [--fps N] [--glyphs blocks|sextants|ful
 
 struct Config {
     hold: f32,
+    bpm: f32,
+    seed: Option<u64>,
     fps: f64,
     glyphs: GlyphSet,
     watch: bool,
@@ -69,6 +77,8 @@ struct Config {
 fn config() -> std::result::Result<Config, String> {
     let mut config = Config {
         hold: 7.0,
+        bpm: 120.0,
+        seed: None,
         fps: 60.0,
         glyphs: GlyphSet::Full,
         watch: false,
@@ -82,6 +92,16 @@ fn config() -> std::result::Result<Config, String> {
             "--hold" => {
                 config.hold =
                     within(&value()?, 0.5, 86_400.0).ok_or("--hold takes 0.5 to 86400 seconds")?
+            }
+            "--bpm" => {
+                config.bpm = within(&value()?, 40.0, 240.0).ok_or("--bpm takes 40 to 240")?
+            }
+            "--seed" => {
+                config.seed = Some(
+                    value()?
+                        .parse()
+                        .map_err(|_| "--seed takes a whole number")?,
+                )
             }
             "--fps" => {
                 config.fps =
@@ -144,7 +164,11 @@ fn main() -> ExitCode {
         .insert_resource(SystemFonts::load())
         .insert_resource(Glyph(Glyphs::new(config.glyphs)))
         .insert_resource(Dither(config.dither))
-        .insert_resource(Show::new(config.hold))
+        .insert_resource(Show::new(
+            f64::from(config.hold),
+            Tempo::new(f64::from(config.bpm)),
+            config.seed.unwrap_or_else(|| fastrand::u64(..1_000_000)),
+        ))
         .init_resource::<Effects>()
         .add_systems(PreUpdate, input)
         .add_systems(Update, frame)
@@ -189,8 +213,14 @@ struct Show {
     pending: Option<Stage>,
     crossing: Option<Crossing>,
     phase: Phase,
-    hold: Timer,
-    accented: bool,
+    tempo: Tempo,
+    /// How long a scene holds, in seconds: whole bars.
+    hold: f64,
+    /// When the next scene is laid out, the accent plays and the scene
+    /// ends, in seconds since launch; the last two on bar lines.
+    prepare_at: f64,
+    accent_at: f64,
+    hold_until: f64,
     caption: bool,
     skip: bool,
     /// The next scene, laid out in the background while this one holds.
@@ -202,32 +232,43 @@ struct Show {
 }
 
 impl Show {
-    fn new(hold: f32) -> Self {
+    fn new(hold: f64, tempo: Tempo, seed: u64) -> Self {
         Self {
             act: Act {
-                subject: Subject::Logo(Logo::Mascot),
-                palette: Palette::first(),
                 shader: Shader::Sheen,
-                backdrop: Backdrop::Vignette,
-                look: Look::Smooth,
-                style: Style::Solid,
                 idle: Idle::Float,
-                mode: Mode::Flat,
                 post: Post::Bloom,
-                variant: 0,
+                ..Act::plain()
             },
             stage: None,
             pending: None,
             crossing: None,
             phase: Phase::Entering,
-            hold: Timer::from_seconds(hold, TimerMode::Once),
-            accented: false,
+            tempo,
+            hold: tempo.bars(hold),
+            prepare_at: f64::MAX,
+            accent_at: f64::MAX,
+            hold_until: f64::MAX,
             caption: true,
             skip: false,
             next: None,
-            director: Director::default(),
+            director: Director::new(seed),
             epoch: 0.0,
         }
+    }
+
+    /// The scene starts holding at `now`, until the first bar line a hold
+    /// later.
+    fn hold_from(&mut self, now: f64) {
+        self.phase = Phase::Holding;
+        self.prepare_at = now + self.hold * 0.2;
+        self.hold_until = self.tempo.next_bar(now + self.hold);
+        let accent = self.tempo.next_bar(now + self.hold * 0.45);
+        self.accent_at = if accent < self.hold_until {
+            accent
+        } else {
+            f64::MAX
+        };
     }
 
     /// Starts laying out the scene after `current` on another thread.
@@ -256,14 +297,14 @@ impl Show {
 }
 
 /// A random item, avoiding `avoid` when possible.
-fn pick<T: Copy + PartialEq>(items: &[T], avoid: Option<T>) -> Option<T> {
+fn pick<T: Copy + PartialEq>(items: &[T], avoid: Option<T>, rng: &mut fastrand::Rng) -> Option<T> {
     let choices: Vec<T> = items
         .iter()
         .copied()
         .filter(|&i| Some(i) != avoid)
         .collect();
     choices
-        .get(fastrand::usize(..choices.len().max(1)))
+        .get(rng.usize(..choices.len().max(1)))
         .copied()
         .or(items.first().copied())
 }
@@ -293,22 +334,26 @@ fn input(
         ) {
             show.skip = true;
         } else if let KeyCode::Char(c) = key.code {
+            // Keys are the visitor's choice, not the seed's.
+            let rng = &mut fastrand::Rng::new();
             match c {
-                't' => act.palette = Palette::random(),
-                's' => act.shader = pick(SHADERS, Some(act.shader)).unwrap_or(act.shader),
-                'b' => act.backdrop = pick(BACKDROPS, Some(act.backdrop)).unwrap_or(act.backdrop),
-                'l' => act.look = pick(LOOKS, Some(act.look)).unwrap_or(act.look),
-                'p' => act.post = pick(POSTS, Some(act.post)).unwrap_or(act.post),
+                't' => act.palette = Palette::random(rng),
+                's' => act.shader = pick(SHADERS, Some(act.shader), rng).unwrap_or(act.shader),
+                'b' => {
+                    act.backdrop = pick(BACKDROPS, Some(act.backdrop), rng).unwrap_or(act.backdrop)
+                }
+                'l' => act.look = pick(Look::ALL, Some(act.look), rng).unwrap_or(act.look),
+                'p' => act.post = pick(Post::ALL, Some(act.post), rng).unwrap_or(act.post),
                 'w' => {
                     let suited: Vec<Idle> = IDLES
                         .iter()
                         .copied()
                         .filter(|i| i.suits(act.mode))
                         .collect();
-                    act.idle = pick(&suited, Some(act.idle)).unwrap_or(act.idle);
+                    act.idle = pick(&suited, Some(act.idle), rng).unwrap_or(act.idle);
                 }
                 'm' => {
-                    act.mode = pick(MODES, Some(act.mode)).unwrap_or(act.mode);
+                    act.mode = pick(Mode::ALL, Some(act.mode), rng).unwrap_or(act.mode);
                     if !act.idle.suits(act.mode) {
                         act.idle = Idle::Still;
                     }
@@ -360,7 +405,7 @@ fn frame(
             effects.transition.cancel_unique_effect(());
             effects.accent.cancel_unique_effect(());
             show.crossing = None;
-            show.phase = Phase::Holding;
+            show.hold_from(now);
             let stage = Stage::new(show.act.clone(), area.width, area.height, cell_ratio());
             if first {
                 effects
@@ -373,29 +418,24 @@ fn frame(
 
         let skip = std::mem::take(&mut show.skip);
         match show.phase {
-            Phase::Entering if skip || !effects.transition.is_running() => {
-                show.phase = Phase::Holding;
-                show.hold.reset();
-                show.accented = false;
-            }
+            Phase::Entering if skip || !effects.transition.is_running() => show.hold_from(now),
             Phase::Holding => {
-                show.hold.tick(dt);
                 if show.next.is_none()
-                    && show.hold.fraction() > 0.2
+                    && now >= show.prepare_at
                     && let Some(stage) = &show.stage
                 {
                     let act = stage.act.clone();
                     show.prepare(&act, &fonts, area.width, area.height);
                 }
-                if !show.accented && show.hold.fraction() > 0.45 {
-                    show.accented = true;
+                if now >= show.accent_at {
+                    show.accent_at = f64::MAX;
                     if let Some(stage) = &show.stage
                         && let Some(accent) = fx::accent(stage, area)
                     {
                         effects.accent.add_unique_effect((), accent);
                     }
                 }
-                if skip || show.hold.is_finished() {
+                if skip || now >= show.hold_until {
                     effects.accent.cancel_unique_effect(());
                     change(show, effects, &fonts, area, now);
                 }
@@ -406,9 +446,7 @@ fn frame(
                 }
                 if show.crossing.as_ref().is_none_or(Crossing::done) {
                     show.crossing = None;
-                    show.phase = Phase::Holding;
-                    show.hold.reset();
-                    show.accented = false;
+                    show.hold_from(now);
                 }
             }
             Phase::Leaving if !effects.transition.is_running() => {
@@ -429,6 +467,7 @@ fn frame(
         let Some(stage) = &show.stage else { return };
         let frame_info = gpu::Frame {
             t: num::narrow(now - show.epoch),
+            beat: show.tempo.phase(now),
             now,
             dt: dt.as_secs_f32(),
             dither: dither.0,
@@ -450,7 +489,8 @@ fn frame(
         if show.caption {
             let act = &stage.act;
             let mut caption = format!(
-                "{}  ·  {}  ·  {}",
+                "seed {}  ·  {}  ·  {}  ·  {}",
+                show.director.seed(),
                 act.label(),
                 act.theme().name,
                 act.shader.name()
@@ -512,8 +552,8 @@ fn notice(buf: &mut ratatui::buffer::Buffer, text: &str) {
     }
 }
 
-/// Starts the change to the next scene: usually a pixel-level crossing in
-/// the same look, sometimes a cell-level transition that can change the look.
+/// Starts the change to the next scene: a pixel-level crossing in the same
+/// look, or a cell-level transition when the look changes.
 fn change(
     show: &mut Show,
     effects: &mut Layers,
@@ -524,9 +564,8 @@ fn change(
     let Some(from) = show.stage.take() else {
         return;
     };
-    let mut next = show.take_next(&from.act, fonts, area.width, area.height);
-    if fastrand::f32() < 0.65 {
-        next.act.look = from.act.look;
+    let next = show.take_next(&from.act, fonts, area.width, area.height);
+    if next.act.look == from.act.look {
         // Rarely needed: most clocks start over during a cell transition.
         show.rebase(now, 1800.0);
         let to = next;
@@ -537,8 +576,9 @@ fn change(
             .copied()
             .filter(|k| !busy || k.simulation().is_none())
             .collect();
-        let kind = pick(&kinds, None).unwrap_or(transition::Kind::Morph);
-        show.crossing = Some(Crossing::new(kind, from, &to));
+        let kind = pick(&kinds, None, show.director.rng()).unwrap_or(transition::Kind::Morph);
+        let duration = num::narrow(show.tempo.beats(f64::from(kind.duration())));
+        show.crossing = Some(Crossing::new(kind, from, &to, duration));
         show.stage = Some(to);
         show.phase = Phase::Crossing;
     } else {
