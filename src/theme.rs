@@ -91,26 +91,27 @@ impl Palette {
 
     /// The first theme, the show's opening colours.
     pub fn first() -> Self {
-        THEMES.first().map_or_else(Self::generated, Self::theme)
+        THEMES.first().map_or_else(
+            || Self::generated(&mut fastrand::Rng::with_seed(0)),
+            Self::theme,
+        )
     }
 
     /// One of the themes, or now and then a palette made up on the spot.
-    pub fn random() -> Self {
-        if fastrand::f32() < 0.45 {
-            return Self::generated();
+    pub fn random(rng: &mut fastrand::Rng) -> Self {
+        if rng.f32() < 0.45 {
+            return Self::generated(rng);
         }
-        let theme = THEMES
-            .get(fastrand::usize(..THEMES.len()))
-            .unwrap_or(&FALLBACK);
+        let theme = THEMES.get(rng.usize(..THEMES.len())).unwrap_or(&FALLBACK);
         Self::theme(theme)
     }
 
     /// A colour harmony around a random hue, in OKLCH so its colours look
     /// evenly bright: hues spread by one of the classic schemes, a dark
     /// background tinted with the base hue, an accent opposite it.
-    pub fn generated() -> Self {
-        let hue = fastrand::f32() * 360.0;
-        let (scheme, offsets): (&str, [f32; 5]) = match fastrand::u8(0..6) {
+    pub fn generated(rng: &mut fastrand::Rng) -> Self {
+        let hue = rng.f32() * 360.0;
+        let (scheme, offsets): (&str, [f32; 5]) = match rng.u8(0..6) {
             0 => ("analogous", [-40.0, -20.0, 0.0, 20.0, 40.0]),
             1 => ("complementary", [0.0, 20.0, 180.0, 200.0, -15.0]),
             2 => ("triadic", [0.0, 120.0, 240.0, 30.0, 150.0]),
@@ -125,9 +126,9 @@ impl Palette {
                 let light = if scheme == "tonal" {
                     0.45 + 0.1 * num::float(i)
                 } else {
-                    0.62 + fastrand::f32() * 0.22
+                    0.62 + rng.f32() * 0.22
                 };
-                oklch(light, 0.09 + fastrand::f32() * 0.1, hue + offset)
+                oklch(light, 0.09 + rng.f32() * 0.1, hue + offset)
             })
             .collect();
         Self {
@@ -346,8 +347,9 @@ mod tests {
 
     #[test]
     fn generated_palettes_stay_in_gamut() {
+        let mut rng = fastrand::Rng::with_seed(5);
         for _ in 0..200 {
-            let p = Palette::generated();
+            let p = Palette::generated(&mut rng);
             for c in p.stops.iter().chain([&p.background, &p.accent]) {
                 assert!(
                     [c.0, c.1, c.2].iter().all(|v| (0.0..=1.0).contains(v)),

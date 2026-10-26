@@ -66,23 +66,6 @@ pub enum Look {
     Text,
 }
 
-pub const LOOKS: &[Look] = &[
-    Look::Smooth,
-    Look::Smooth,
-    Look::Smooth,
-    Look::Smooth,
-    Look::Pixels,
-    Look::Braille,
-    Look::Braille,
-    Look::Ascii,
-    Look::Led,
-    Look::Shapes,
-    Look::Code,
-    Look::Contour,
-    Look::Halftone,
-    Look::Text,
-];
-
 impl Look {
     /// Every look once, in the shader's order (`L_*`).
     pub const ALL: &[Look] = &[
@@ -150,27 +133,6 @@ pub enum Mode {
     /// Lenia: continuous life, whose creatures hatch from the letters.
     Lenia,
 }
-
-pub const MODES: &[Mode] = &[
-    Mode::Flat,
-    Mode::Flat,
-    Mode::Flat,
-    Mode::Flat,
-    Mode::Turntable,
-    Mode::Turntable,
-    Mode::Fluid,
-    Mode::Reaction,
-    Mode::Life,
-    Mode::Fire,
-    Mode::Ripple,
-    Mode::Swarm,
-    Mode::Slime,
-    Mode::Boids,
-    Mode::Sand,
-    Mode::Crystal,
-    Mode::Ink,
-    Mode::Lenia,
-];
 
 impl Mode {
     /// Every mode once, in the shader's order (`M_*`).
@@ -261,23 +223,6 @@ pub enum Post {
     /// The Droste effect: the picture spiralling into itself, endlessly.
     Droste,
 }
-
-pub const POSTS: &[Post] = &[
-    Post::Clean,
-    Post::Clean,
-    Post::Bloom,
-    Post::Bloom,
-    Post::Trails,
-    Post::Echo,
-    Post::Chroma,
-    Post::Crt,
-    Post::Grain,
-    Post::Rays,
-    Post::Rays,
-    Post::Paint,
-    Post::Silk,
-    Post::Droste,
-];
 
 impl Post {
     /// Every effect once, in the shader's order (`P_*`).
@@ -390,6 +335,22 @@ pub struct Act {
 }
 
 impl Act {
+    /// The plainest scene: every layer at its quietest.
+    pub fn plain() -> Self {
+        Act {
+            subject: Subject::Logo(Logo::Mascot),
+            palette: Palette::first(),
+            shader: Shader::Flow,
+            backdrop: Backdrop::Vignette,
+            look: Look::Smooth,
+            style: Style::Solid,
+            idle: Idle::Still,
+            mode: Mode::Flat,
+            post: Post::Clean,
+            variant: 0,
+        }
+    }
+
     pub fn theme(&self) -> &Palette {
         &self.palette
     }
@@ -460,6 +421,12 @@ fn letters(bitmap: &Bitmap) -> Vec<u8> {
 }
 
 const MAX_PIECES: usize = 2;
+
+/// The least height, in samples, at which a piece of art reads from across
+/// a hall on a screen `h` samples high: a sixth of it, and three rows.
+fn min_height(h: f32) -> f32 {
+    (h / 6.0).max(num::float(ROWS) * 3.0)
+}
 const MAX_STOPS: usize = 5;
 
 /// An option's position in its list, which the shader switches on.
@@ -496,12 +463,15 @@ pub struct Stage {
 
 impl Stage {
     /// `cell_ratio` is a cell's height over its width.
-    pub fn new(act: Act, cols: u16, rows: u16, cell_ratio: f32) -> Self {
+    /// A logo and wordmark together that would leave either too small to
+    /// read from afar become the logo alone.
+    pub fn new(mut act: Act, cols: u16, rows: u16, cell_ratio: f32) -> Self {
         let w = f32::from(cols) * num::float(COLS);
         let h = f32::from(rows.saturating_sub(1)) * num::float(ROWS);
         let aspect = cell_ratio * COLS as f32 / ROWS as f32;
+        let style = act.style;
         let make = |kind: Kind, box_w: f32, box_h: f32| -> Bitmap {
-            let (rw, rh) = act.style.reserve();
+            let (rw, rh) = style.reserve();
             let (bw, bh) = (num::floor_usize(box_w * rw), num::floor_usize(box_h * rh));
             let bitmap = match kind {
                 Kind::Logo(Logo::Mascot) => art::mascot().fit(bw, bh, aspect),
@@ -514,7 +484,7 @@ impl Stage {
                 }
                 Kind::Word(Word::Ransom(faces)) => fonts::ransom(&faces, WORDMARK, bw, bh, aspect),
             };
-            act.style.apply(bitmap)
+            style.apply(bitmap)
         };
         let centered = |bitmap: Bitmap| {
             let (x, y) = (
@@ -524,7 +494,7 @@ impl Stage {
             Piece::new(bitmap, x.floor(), y.floor())
         };
 
-        let pieces = match &act.subject {
+        let lay = |subject: &Subject| match subject {
             Subject::Logo(logo) => {
                 vec![centered(make(Kind::Logo(logo.clone()), w * 0.78, h * 0.8))]
             }
@@ -561,6 +531,13 @@ impl Stage {
                 ]
             }
         };
+        let mut pieces = lay(&act.subject);
+        if let Subject::Lockup(logo, _) = &act.subject
+            && pieces.iter().any(|p| p.height() < min_height(h))
+        {
+            act.subject = Subject::Logo(logo.clone());
+            pieces = lay(&act.subject);
+        }
 
         let amplitude = (h * 0.015).max(1.0);
         static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -765,15 +742,7 @@ mod tests {
     fn act(subject: Subject) -> Act {
         Act {
             subject,
-            palette: Palette::generated(),
-            shader: Shader::Flow,
-            backdrop: Backdrop::Vignette,
-            look: Look::Smooth,
-            style: Style::Solid,
-            idle: Idle::Still,
-            mode: Mode::Flat,
-            post: Post::Clean,
-            variant: 0,
+            ..Act::plain()
         }
     }
 
@@ -798,6 +767,10 @@ mod tests {
                 Subject::Lockup(Logo::Mascot, Word::Pixel),
             ] {
                 let stage = Stage::new(act(subject), cols, rows, 2.0);
+                let h = f32::from(rows.saturating_sub(1)) * num::float(ROWS);
+                if matches!(stage.act.subject, Subject::Lockup(..)) {
+                    assert!(stage.pieces.iter().all(|p| p.height() >= min_height(h)));
+                }
                 for piece in &stage.pieces {
                     assert!(piece.x >= 0.0 && piece.y >= 0.0, "{cols}x{rows}");
                     assert!(

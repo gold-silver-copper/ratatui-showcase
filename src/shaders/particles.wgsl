@@ -309,6 +309,36 @@ fn flame(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) 
                 c = (c + fj / 3.0 + 0.1) * 0.5;
                 screen = centre + p * unit * 0.4;
             }
+            case B_COLLAGE: {
+                // Barnsley's collage theorem: maps that each shrink the art
+                // onto one inked cell of a grid laid over it have the art as
+                // their attractor, so it comes out made of copies of itself,
+                // made of copies in turn. Each copy turns a little.
+                let art = piece(s, 0u);
+                let n = 5.0 + f32(v % 3u);
+                let size = vec2(art.w, art.h);
+                var cell = vec2(0.0);
+                for (var tries = 0; tries < 16; tries++) {
+                    cell = floor(vec2(next_random(&rng), next_random(&rng)) * n);
+                    if (texel(art, (cell + 0.5) / n * size) & 0xffu) >= 128u { break; }
+                }
+                let id = hash(u32(cell.x) + v * 17u, u32(cell.y));
+                // Turned in the art's own proportions, so copies keep them.
+                let aspect = vec2(size.x / max(size.y, 1.0), 1.0);
+                let q = rot(0.3 * sin(t * 0.25 + id * TAU)) * ((p - 0.5) * aspect) / aspect;
+                p = (cell + 0.5 + q) / n;
+                c = mix(c, id, 0.5);
+                // Slowly in toward one of the copies and back out.
+                var focus = vec2(0.5);
+                for (var tries = 0u; tries < 16u; tries++) {
+                    let f = vec2(hash(v, tries), hash(v + 7u, tries));
+                    if (texel(art, f * size) & 0xffu) >= 128u { focus = f; break; }
+                }
+                let zoom = exp(1.2 * (0.5 - 0.5 * cos(t * TAU / 40.0)));
+                let k = min(width() / max(size.x, 1.0), height() / max(size.y, 1.0)) * 1.1;
+                screen = centre + ((p - focus) * zoom + focus - 0.5) * size * k;
+
+            }
             case B_CLIFFORD: {
                 // Clifford attractor.
                 let a = -1.7 + 0.15 * sin(t * 0.05);

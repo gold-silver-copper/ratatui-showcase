@@ -36,18 +36,6 @@ pub enum Style {
     Reflect,
 }
 
-pub const STYLES: &[Style] = &[
-    Style::Solid,
-    Style::Solid,
-    Style::Outline,
-    Style::Neon,
-    Style::Bevel,
-    Style::Bevel,
-    Style::Shadow,
-    Style::Extrude,
-    Style::Reflect,
-];
-
 impl Style {
     /// Every style once (`ST_*`).
     pub const ALL: &[Style] = &[

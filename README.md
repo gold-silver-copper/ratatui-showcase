@@ -9,6 +9,7 @@ fill any terminal while keeping their proportions, with
 ```sh
 cargo run --release
 cargo run --release -- --hold 10 --glyphs sextants
+cargo run --release -- --seed 1234 # the scenes of seed 1234 again
 cargo run --release -- --watch     # edit src/shaders and watch it change
 cargo run --release -- --profile   # GPU time per phase in the caption
 ```
@@ -28,7 +29,9 @@ cargo run --release -- --profile   # GPU time per phase in the caption
 
 | Option | Meaning |
 | --- | --- |
-| `--hold SECONDS` | How long each scene stays, 0.5 to 86400 (default 7) |
+| `--hold SECONDS` | How long each scene stays, 0.5 to 86400 (default 7), rounded to whole bars of the tempo: 7 is 4 bars at 120 bpm |
+| `--bpm N` | The show's tempo, 40 to 240 (default 120) |
+| `--seed N` | Which scenes play. The caption shows the seed; the same seed on a terminal of the same size plays the same scenes again. Without it, a random one. |
 | `--fps N` | Frames per second, 1 to 1000 (default 60). Simulations run at the same speed at any rate. |
 | `--glyphs blocks\|sextants\|full` | Block characters your terminal draws well. `full` (the default) adds octants and diagonal wedges, which foot, kitty, ghostty and wezterm draw themselves; use `sextants` or `blocks` elsewhere. |
 | `--watch` | Reload the shaders in `src/shaders` whenever they change; an edit that doesn't compile, or whose pipelines fail to build, leaves the running shader in place and shows the error in the caption. |
@@ -54,15 +57,20 @@ cargo run --release -- --profile   # GPU time per phase in the caption
 - **Styles:** solid, outlined, neon tubes, bevelled and lit, with a drop
   shadow, extruded 3D lettering, or reflected.
 - **Backgrounds:** a vignette, twinkling stars, a synthwave grid, aurora
-  curtains, sun rays, Julia sets, an endless deep Mandelbrot zoom, the Burning
+  curtains, sun rays, Julia sets walking the Mandelbrot set's boundary, an
+  endless deep Mandelbrot zoom, the Burning
   Ship, Newton's fractal, a kaleidoscope, a tunnel, warp-speed stars,
   ray-marched Mandelbulb and Menger sponge fractals, a flight over ray-marched
   hills, metaballs, stained glass, marbled paper, the Apollonian gasket, a
   Kleinian group's limit set by Jos Leys' escape-time algorithm, hyperbolic
   tilings of the Poincare disk gliding under Mobius maps, domain colouring of
   a complex function, a ray-marched Mandelbox and kaleidoscopic IFS, the
-  scene's own art tiled, fractal flames, the Clifford, de Jong and Lorenz
-  attractors, and Particle Life.
+  scene's art as a collage of copies of itself (by Barnsley's collage
+  theorem) slowly zooming in, fractal flames, the Clifford, de Jong and Lorenz
+  attractors, and Particle Life. The Julia sets and the Mandelbrot zoom use
+  the scene's art as an orbit trap: where an escaping orbit passes through
+  the logo or the wordmark, they light up, so the fractal draws bent copies
+  of it.
 - **Colours:** the themes Classic, Aurora, Synthwave, Ember, Ocean, Candy,
   Phosphor, Prism, Sunset, Glacier and Toxic, or a palette made up for the
   scene: an analogous, complementary, triadic, split, tetradic or tonal
@@ -82,8 +90,39 @@ cargo run --release -- --profile   # GPU time per phase in the caption
   contour lines in box-drawing characters, halftone dots, or the picture
   spelled out in this README.
 
-Each scene is a fresh combination that avoids what played in the last few,
-and now and then one of a dozen hand-tuned presets.
+## How scenes are chosen
+
+Every choice of every layer has a busyness, from plain (a vignette, the
+smooth look, flat art) to enough to lead the scene (a deep fractal, a
+simulation, falling code). A scene's busyness, plus a penalty for pairs
+known to clash (character looks under film grain or oil paint, thin neon
+strokes in a character look, a busy shader over a busy fractal), stays under
+a budget, and at most one layer leads. That still leaves about 2.9 million
+combinations of shader, background, look, style, mode, post-processing and
+motion, before palettes and subjects (26 million without the budget).
+
+Scenes come in short runs of three to five, each from a pattern: building up
+to a peak and calming down, a slow burn, one background under three looks
+or in several moods, a tour of backgrounds, the art itself leading, or a
+peak and its echoes. A run starts from scratch; each cut after that changes
+one or two layers, and the hand-tuned presets are the peaks. Among the
+choices that fit, the ones not seen for longest are the likeliest, so over
+hours every choice keeps coming up. The look only changes with a cell
+transition; every other cut is drawn at sub-cell resolution.
+
+One tempo runs the show: cuts land on bar lines, the accents on a later
+one, transitions last whole beats, and the motions while holding float,
+wave, breathe and hop in time.
+
+The art stays readable whatever plays behind it. Around it, the background
+is dimmed just as far as the art's colours need to keep a contrast of 3:1
+(WCAG's for large text), measured per sample on the GPU from the distance
+field and checked again after bloom and the other effects: a dark
+background is left alone, a bright fractal gets a dark halo. A logo and
+wordmark together that would leave either under a sixth of the screen's
+height show the logo alone.
+
+Every choice comes from one seeded generator, shown in the caption.
 
 ## Transitions
 
@@ -111,9 +150,11 @@ window. Each frame is a chain of compute passes (`src/shaders`):
    they land to a histogram that fades a little each frame.
 3. **Distance fields**: jump flooding finds, for every point, the nearest edge
    of each scene's art, kept as a grid of signed distances. They give the
-   glow, outlines, neon, bevels, shadows, the 3D solid and the melt, and let
-   the scene skip everything far from the art. While the art holds still they
-   are kept from frame to frame.
+   glow, outlines, neon, bevels, shadows, the 3D solid, the melt, the orbit
+   traps and the halo that keeps the art readable, and let the scene skip
+   everything far from the art. While the art holds still they are kept from
+   frame to frame.
+
 4. **Backgrounds** at a quarter of the samples, sampled smoothly: fractals and
    ray-marching cost a quarter as much. The Mandelbrot zoom follows a reference
    orbit computed in double precision on the CPU, so it can go to 1e-8 in f32.

@@ -16,15 +16,18 @@ fn local(s: u32, p: Piece, x: f32, y: f32, t: f32) -> vec2<f32> {
     var l = vec2(x - p.x, y - p.y);
     let c = vec2(p.w, p.h) / 2.0;
     let amplitude = pf(s + S_AMPLITUDE);
+    // Motions keep the show's time: a float every two bars, a wave a bar,
+    // a hop every other beat.
+    let b = beat() * TAU;
     switch params[s + S_IDLE] {
-        case I_FLOAT: { l.y -= amplitude * sin(t * 0.9); }
-        case I_WAVE: { l.y -= amplitude * sin(l.x / max(p.w, 1.0) * TAU * 0.9 - t * 2.2); }
-        case I_BREATHE: { l = c + (l - c) / (1.0 + 0.035 * sin(t * 1.2)); }
-        case I_SWAY: { l = c + rot(-0.04 * sin(t * 0.7)) * (l - c); }
+        case I_FLOAT: { l.y -= amplitude * sin(b / 8.0); }
+        case I_WAVE: { l.y -= amplitude * sin(l.x / max(p.w, 1.0) * TAU * 0.9 - b / 4.0); }
+        case I_BREATHE: { l = c + (l - c) / (1.0 + 0.035 * sin(b / 8.0)); }
+        case I_SWAY: { l = c + rot(-0.04 * sin(b / 16.0)) * (l - c); }
         case I_BOUNCE: {
             // Letters hop one after another: each column knows its letter.
             if l.x >= 0.0 && l.x < p.w {
-                l.y += amplitude * 3.0 * abs(sin(t * 2.6 - letter(p, l.x) * 0.55));
+                l.y += amplitude * 3.0 * abs(sin(b / 4.0 - letter(p, l.x) * 0.55));
             }
         }
         case I_ARRIVE: {
@@ -50,19 +53,19 @@ fn ticker(p: Piece) -> f32 { return max(width(), p.w) + width() * 0.2; }
 /// Where the art's point `(x, y)` at rest is now: `local` the other way, so
 /// particles leave from and land on the art as it moves.
 fn placed(s: u32, x: f32, y: f32) -> vec2<f32> {
-    let t = time();
     let amplitude = pf(s + S_AMPLITUDE);
+    let b = beat() * TAU;
     for (var i = 0u; i < params[s + S_PIECES]; i++) {
         let p = piece(s, i);
         var l = vec2(x - p.x, y - p.y);
         if l.x < 0.0 || l.y < 0.0 || l.x >= p.w || l.y >= p.h { continue; }
         let c = vec2(p.w, p.h) / 2.0;
         switch params[s + S_IDLE] {
-            case I_FLOAT: { l.y += amplitude * sin(t * 0.9); }
-            case I_WAVE: { l.y += amplitude * sin(l.x / max(p.w, 1.0) * TAU * 0.9 - t * 2.2); }
-            case I_BREATHE: { l = c + (l - c) * (1.0 + 0.035 * sin(t * 1.2)); }
-            case I_SWAY: { l = c + rot(0.04 * sin(t * 0.7)) * (l - c); }
-            case I_BOUNCE: { l.y -= amplitude * 3.0 * abs(sin(t * 2.6 - letter(p, l.x) * 0.55)); }
+            case I_FLOAT: { l.y += amplitude * sin(b / 8.0); }
+            case I_WAVE: { l.y += amplitude * sin(l.x / max(p.w, 1.0) * TAU * 0.9 - b / 4.0); }
+            case I_BREATHE: { l = c + (l - c) * (1.0 + 0.035 * sin(b / 8.0)); }
+            case I_SWAY: { l = c + rot(0.04 * sin(b / 16.0)) * (l - c); }
+            case I_BOUNCE: { l.y -= amplitude * 3.0 * abs(sin(b / 4.0 - letter(p, l.x) * 0.55)); }
             case I_ARRIVE: { l.y -= arrival(s, letter(p, l.x)); }
             case I_MARQUEE: {
                 let x = wrap((p.x + l.x - marquee(s)) / ticker(p)) * ticker(p);
