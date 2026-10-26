@@ -25,18 +25,6 @@ fn layer_art(s: u32, layer: u32, x: f32, y: f32, t: f32, row: u32) -> Art {
     return art(s, layer, x, y, t, row);
 }
 
-/// How far water bends the view at `p`: the new scene's, or the old one's
-/// as it goes.
-fn water(p: vec2<f32>) -> vec2<f32> {
-    let sim = params[H_SIM_SCENE];
-    let fading = 1.0 - progress();
-    if sim != 0u && mode(sim) == M_RIPPLE {
-        return ripple_offset(sim_latest(), p) * select(1.0, fading, sim == H_FROM && kind() != K_STILL);
-    }
-    if kind() != K_STILL && mode(H_FROM) == M_RIPPLE { return ripple_offset(H_SNAPSHOT, p) * fading; }
-    return vec2(0.0);
-}
-
 /// Relative luminance: colours here are about the square root of linear
 /// light (see `mixl`).
 fn luminance(c: vec3<f32>) -> f32 { return dot(c * c, vec3(0.2126, 0.7152, 0.0722)); }
@@ -67,19 +55,11 @@ fn scene(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) 
     if i >= img_w() * img_h() { return; }
     let sx = i % img_w();
     let sy = i / img_w();
-    var p = vec2(f32(sx) + 0.5, f32(sy) + 0.5);
+    let p = vec2(f32(sx) + 0.5, f32(sy) + 0.5);
     let t = time();
     let k = kind();
     let row = sy / 4u;
 
-    // Water bends everything under it.
-    var glint = 0.0;
-    let o = water(p);
-    if any(o != vec2(0.0)) {
-        p += o * 5.0;
-        let n = normalize(vec3(-o * 1.2, 1.0));
-        glint = pow(max(dot(n, normalize(vec3(-0.4, -0.6, 0.7))), 0.0), 90.0) * 0.5;
-    }
     let x01 = p.x / width();
     let y01 = p.y / height();
 
@@ -187,7 +167,7 @@ fn scene(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) 
     }
 
     base *= 1.0 - shadow;
-    let colour = mixl(base, ink, alpha) + WHITE * glint;
+    let colour = mixl(base, ink, alpha);
     // Alpha carries the depth-of-field blur radius to the post pass.
     state[params[H_SCENE] + i] = vec4(colour, blur);
 }
