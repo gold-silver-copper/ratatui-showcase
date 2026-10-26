@@ -220,10 +220,9 @@ impl Director {
             look: fresh(LOOKS, &self.used(|a| a.look, &[Look::Smooth], 3)).unwrap_or(Look::Smooth),
             style: fresh(STYLES, &self.used(|a| a.style, &[Style::Solid], 2))
                 .unwrap_or(Style::Solid),
-            idle: if mode == Mode::Turntable {
-                Idle::Still
-            } else {
-                fresh(IDLES, &self.used(|a| a.idle, &[], 2)).unwrap_or(Idle::Still)
+            idle: {
+                let suited: Vec<Idle> = IDLES.iter().copied().filter(|i| i.suits(mode)).collect();
+                fresh(&suited, &self.used(|a| a.idle, &[], 2)).unwrap_or(Idle::Still)
             },
             mode,
             post: fresh(POSTS, &self.used(|a| a.post, &[Post::Clean], 2)).unwrap_or(Post::Clean),

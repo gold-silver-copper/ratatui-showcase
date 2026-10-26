@@ -34,21 +34,36 @@ impl Panel {
     }
 }
 
-/// Cells the widgets are laid out in.
-const WIDTH: u16 = 60;
-const HEIGHT: u16 = 18;
-
-/// The widgets of `panel`, with data from `seed`, as pixels: 4 x 8 per cell.
-pub fn render(panel: Panel, seed: u64) -> Bitmap {
+/// The widgets of `panel`, with data from `seed`, as pixels: 4 x 8 per
+/// cell, laid out so that they fill a `box_w` x `box_h` pixel box at two
+/// pixels each.
+pub fn render(panel: Panel, seed: u64, box_w: usize, box_h: usize) -> Bitmap {
     let mut rng = fastrand::Rng::with_seed(seed);
-    let area = Rect::new(0, 0, WIDTH, HEIGHT);
+    let cells = |pixels: usize, per: usize, low: u16, high: u16| {
+        u16::try_from(pixels.checked_div(per.saturating_mul(2)).unwrap_or(0))
+            .unwrap_or(high)
+            .clamp(low, high)
+    };
+    let area = Rect::new(
+        0,
+        0,
+        cells(box_w, COLS, 30, 160),
+        cells(box_h, ROWS, 10, 50),
+    );
     let mut buf = Buffer::empty(area);
     match panel {
         Panel::Bars => {
             let names = [
                 "rat", "a", "tui", "tty", "vt", "pty", "ansi", "crt", "tty2", "bash",
             ];
-            let data: Vec<(&str, u64)> = names.iter().map(|&n| (n, rng.u64(2..=40))).collect();
+            // As many bars as fit, five cells each.
+            let count = usize::from(area.width.saturating_sub(2).div_ceil(5));
+            let data: Vec<(&str, u64)> = names
+                .iter()
+                .cycle()
+                .take(count)
+                .map(|&n| (n, rng.u64(2..=40)))
+                .collect();
             BarChart::default()
                 .block(Block::bordered().title(" widgets rendered "))
                 .bar_width(4)
@@ -93,7 +108,7 @@ pub fn render(panel: Panel, seed: u64) -> Bitmap {
                 Constraint::Length(3),
             ])
             .split(area);
-            let samples: Vec<u64> = (0..u64::from(WIDTH))
+            let samples: Vec<u64> = (0..u64::from(area.width))
                 .map(|i| {
                     let x =
                         num::narrow(f64::from(num::u32_of(usize::try_from(i).unwrap_or(0))) * 0.25);
@@ -243,7 +258,7 @@ mod tests {
     #[test]
     fn every_panel_draws_something() {
         for &panel in PANELS {
-            let bitmap = render(panel, 7);
+            let bitmap = render(panel, 7, 480, 300);
             let ink = (0..bitmap.height)
                 .flat_map(|y| (0..bitmap.width).map(move |x| (x, y)))
                 .filter(|&(x, y)| bitmap.get(x, y).ink > 0.5)

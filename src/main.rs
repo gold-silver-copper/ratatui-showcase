@@ -299,10 +299,17 @@ fn input(
                 'b' => act.backdrop = pick(BACKDROPS, Some(act.backdrop)).unwrap_or(act.backdrop),
                 'l' => act.look = pick(LOOKS, Some(act.look)).unwrap_or(act.look),
                 'p' => act.post = pick(POSTS, Some(act.post)).unwrap_or(act.post),
-                'w' => act.idle = pick(IDLES, Some(act.idle)).unwrap_or(act.idle),
+                'w' => {
+                    let suited: Vec<Idle> = IDLES
+                        .iter()
+                        .copied()
+                        .filter(|i| i.suits(act.mode))
+                        .collect();
+                    act.idle = pick(&suited, Some(act.idle)).unwrap_or(act.idle);
+                }
                 'm' => {
                     act.mode = pick(MODES, Some(act.mode)).unwrap_or(act.mode);
-                    if act.mode == Mode::Turntable {
+                    if !act.idle.suits(act.mode) {
                         act.idle = Idle::Still;
                     }
                     rebuild = true;

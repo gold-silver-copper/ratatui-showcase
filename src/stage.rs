@@ -335,6 +335,16 @@ pub enum Idle {
 }
 
 impl Idle {
+    /// Whether the motion can go with `mode`: the 3D solid holds still, and
+    /// simulations start from the art where it is at first, so it must be
+    /// on screen and stay near there.
+    pub fn suits(self, mode: Mode) -> bool {
+        if mode == Mode::Turntable {
+            return self == Idle::Still;
+        }
+        !(mode.simulates() || mode.flocks()) || !matches!(self, Idle::Arrive | Idle::Marquee)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Idle::Still => "still",
@@ -511,7 +521,9 @@ impl Stage {
                 Kind::Phrase(text, Word::Small | Word::Tiny | Word::Pixel) => {
                     art::pixel_font(text).fit(bw, bh, aspect)
                 }
-                Kind::Widget(panel, seed) => widgets::render(panel, seed).fit(bw, bh, aspect),
+                Kind::Widget(panel, seed) => {
+                    widgets::render(panel, seed, bw, bh).fit(bw, bh, aspect)
+                }
             };
             act.style.apply(bitmap)
         };
@@ -793,6 +805,17 @@ mod tests {
     }
 
     #[test]
+    fn every_mode_has_motions_that_suit_it() {
+        for &mode in Mode::ALL {
+            assert!(IDLES.iter().any(|i| i.suits(mode)), "{mode:?}");
+            // Simulations start from where the art is at first.
+            if mode.simulates() || mode.flocks() {
+                assert!(!Idle::Arrive.suits(mode) && !Idle::Marquee.suits(mode));
+            }
+        }
+    }
+
+    #[test]
     fn art_fits_on_screen_for_every_subject_and_size() {
         for (cols, rows) in [(40, 12), (80, 24), (160, 48), (300, 90), (60, 70)] {
             for subject in [
@@ -800,6 +823,9 @@ mod tests {
                 Subject::Logo(Logo::Emblem),
                 Subject::Word(Word::Small),
                 Subject::Lockup(Logo::Mascot, Word::Pixel),
+                Subject::Phrase("cargo add ratatui", Word::Pixel),
+                Subject::Widget(Panel::Bars, 1),
+                Subject::Widget(Panel::Dashboard, 2),
             ] {
                 let stage = Stage::new(act(subject), cols, rows, 2.0);
                 for piece in &stage.pieces {
