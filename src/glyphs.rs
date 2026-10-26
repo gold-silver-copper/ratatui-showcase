@@ -1,5 +1,6 @@
 //! Picking the block glyph whose shape best matches a cell's coverage.
 //!
+//! The shader does the matching (`render.wgsl`); this builds the table.
 //! A cell is sampled on a 4x8 grid; bit `row * 4 + col` is set where the art
 //! covers that sample. Each candidate glyph gets the same kind of mask, and
 //! the nearest one by Hamming distance wins. Edges then land on sub-cell
@@ -11,7 +12,6 @@ use crate::num;
 
 pub const COLS: usize = 4;
 pub const ROWS: usize = 8;
-pub const FULL: u32 = u32::MAX;
 
 /// How much of Unicode's block repertoire the terminal draws well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,8 +133,22 @@ impl Glyphs {
         Self { table }
     }
 
-    /// The glyph nearest to `mask`, and that glyph's own mask.
-    pub fn best(&self, mask: u32) -> (char, u32) {
+    /// The table for the GPU: each glyph's mask, then its code point.
+    pub fn pack(&self) -> Vec<u32> {
+        self.table
+            .iter()
+            .flat_map(|&(mask, c)| [mask, u32::from(c)])
+            .collect()
+    }
+
+    pub fn len(&self) -> u32 {
+        num::u32_of(self.table.len())
+    }
+
+    /// The glyph nearest to `mask`, and that glyph's own mask, as the shader
+    /// picks it.
+    #[cfg(test)]
+    fn best(&self, mask: u32) -> (char, u32) {
         self.table
             .iter()
             .min_by_key(|&&(m, _)| (m ^ mask).count_ones())
@@ -180,6 +194,8 @@ fn in_triangle(x: f32, y: f32, [a, b, c]: [(f32, f32); 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FULL: u32 = u32::MAX;
 
     #[test]
     fn exact_shapes_match_their_glyph() {
