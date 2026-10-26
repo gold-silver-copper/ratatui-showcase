@@ -33,7 +33,7 @@ cargo run --release -- --profile   # GPU time per phase in the caption
 | `--glyphs blocks\|sextants\|full` | Block characters your terminal draws well. `full` (the default) adds octants and diagonal wedges, which foot, kitty, ghostty and wezterm draw themselves; use `sextants` or `blocks` elsewhere. |
 | `--watch` | Reload the shaders in `src/shaders` whenever they change; an edit that doesn't compile, or whose pipelines fail to build, leaves the running shader in place and shows the error in the caption. |
 | `--profile` | Show the GPU time of each phase in the caption (timestamp queries). |
-| `--dither` | Dither colours over time for smoother gradients; every cell then changes every frame, so the terminal works about three times as hard. |
+| `--dither` | Dither colours with blue noise moving on by the golden ratio each frame, for smoother gradients; cells then change every frame, so the terminal works harder. |
 
 ## What it shows
 
@@ -50,8 +50,9 @@ cargo run --release -- --profile   # GPU time per phase in the caption
   of Life; burning letters with rising smoke; under rippling water; a swarm
   of particles that hold the shape; slime mold whose trail network draws the
   letters; a flock of boids that gathers into them; letters crumbling into
-  falling sand; crystals branching until they fill the letters; or ink rising
-  from them and curling through water.
+  falling sand; crystals branching until they fill the letters; ink rising
+  from them and curling through water; or Lenia, continuous life whose
+  creatures hatch from the letters.
 - **Styles:** solid, outlined, neon tubes, bevelled and lit, with a drop
   shadow, extruded 3D lettering, or reflected.
 - **Backgrounds:** a vignette, twinkling stars, a synthwave grid, aurora
@@ -59,8 +60,11 @@ cargo run --release -- --profile   # GPU time per phase in the caption
   Ship, Newton's fractal, a kaleidoscope, a tunnel, warp-speed stars,
   ray-marched Mandelbulb and Menger sponge fractals, a flight over ray-marched
   hills, metaballs, stained glass, marbled paper, the Apollonian gasket, a
-  Kleinian limit set, the scene's own art tiled, fractal flames, the
-  Clifford, de Jong and Lorenz attractors, and Particle Life.
+  Kleinian group's limit set by Jos Leys' escape-time algorithm, hyperbolic
+  tilings of the Poincare disk gliding under Mobius maps, domain colouring of
+  a complex function, a ray-marched Mandelbox and kaleidoscopic IFS, the
+  scene's own art tiled, fractal flames, the Clifford, de Jong and Lorenz
+  attractors, and Particle Life.
 - **Colours:** the themes Classic, Aurora, Synthwave, Ember, Ocean, Candy,
   Phosphor, Prism, Sunset, Glacier and Toxic, or a palette made up for the
   scene: an analogous, complementary, triadic, split, tetradic or tonal
@@ -68,8 +72,10 @@ cargo run --release -- --profile   # GPU time per phase in the caption
 - **Shaders:** flow, plasma, pulse, sheen, rainbow, scanline, chrome, holo,
   fire, stripes, marble, lava, gold and glitter.
 - **Post-processing:** bloom at three sizes, motion trails, a zoom echo, chromatic aberration,
-  a curved CRT with phosphor glow, film grain, or shafts of light streaming
-  out from the art.
+  a curved CRT with phosphor glow, film grain, shafts of light streaming
+  out from the art, oil paint (an anisotropic Kuwahara filter), silk (line
+  integral convolution along the fluid or the picture's edges), or the
+  Droste effect spiralling the picture into itself.
 - **Motion while holding:** still, floating, waving, breathing, swaying,
   letters bouncing one after another, letters dropping into place, or a
   ticker scrolling across.
@@ -124,7 +130,9 @@ window. Each frame is a chain of compute passes (`src/shaders`):
    the previous frame for trails and echoes.
 8. **Encode**: each cell's 32 samples are split into two colour groups; the
    split's shape picks the block glyph that matches it best (halves, quadrants,
-   eighths, sextants, octants or diagonal wedges), so edges stay crisp at any
+   eighths, sextants, octants or diagonal wedges): the closest few by shape,
+   then the one whose blurred shape is closest to the blurred picture, so a
+   stroke off by a sample still finds its glyph. Edges stay crisp at any
    size. The terminal's pixel size, where it reports one, keeps proportions.
 
 One glyph and two colours per cell come back for ratatui to print; a cell that

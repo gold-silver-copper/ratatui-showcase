@@ -165,6 +165,8 @@ pub enum Mode {
     Crystal,
     /// Ink rising from the letters and curling through water.
     Ink,
+    /// Lenia: continuous life, whose creatures hatch from the letters.
+    Lenia,
 }
 
 pub const MODES: &[Mode] = &[
@@ -185,6 +187,7 @@ pub const MODES: &[Mode] = &[
     Mode::Sand,
     Mode::Crystal,
     Mode::Ink,
+    Mode::Lenia,
 ];
 
 impl Mode {
@@ -203,6 +206,7 @@ impl Mode {
         Mode::Sand,
         Mode::Crystal,
         Mode::Ink,
+        Mode::Lenia,
     ];
 
     pub fn code(self) -> u32 {
@@ -225,7 +229,8 @@ impl Mode {
             | Mode::Slime
             | Mode::Sand
             | Mode::Crystal
-            | Mode::Ink => true,
+            | Mode::Ink
+            | Mode::Lenia => true,
             Mode::Flat | Mode::Turntable | Mode::Swarm | Mode::Boids => false,
         }
     }
@@ -245,6 +250,7 @@ impl Mode {
             Mode::Sand => "sand",
             Mode::Crystal => "crystal",
             Mode::Ink => "ink",
+            Mode::Lenia => "lenia",
         }
     }
 }
@@ -266,6 +272,12 @@ pub enum Post {
     Grain,
     /// Shafts of light streaming out from the art.
     Rays,
+    /// Oil paint: brush strokes that follow the picture's edges.
+    Paint,
+    /// Silk: streaks drawn along the picture's flow.
+    Silk,
+    /// The Droste effect: the picture spiralling into itself, endlessly.
+    Droste,
 }
 
 pub const POSTS: &[Post] = &[
@@ -280,6 +292,9 @@ pub const POSTS: &[Post] = &[
     Post::Grain,
     Post::Rays,
     Post::Rays,
+    Post::Paint,
+    Post::Silk,
+    Post::Droste,
 ];
 
 impl Post {
@@ -293,6 +308,9 @@ impl Post {
         Post::Crt,
         Post::Grain,
         Post::Rays,
+        Post::Paint,
+        Post::Silk,
+        Post::Droste,
     ];
 
     pub fn code(self) -> u32 {
@@ -314,6 +332,9 @@ impl Post {
             Post::Crt => "crt",
             Post::Grain => "grain",
             Post::Rays => "rays",
+            Post::Paint => "paint",
+            Post::Silk => "silk",
+            Post::Droste => "droste",
         }
     }
 }

@@ -6,7 +6,7 @@ fn layer_art(s: u32, layer: u32, x: f32, y: f32, t: f32, row: u32) -> Art {
     let m = mode(s);
     if m == M_TURNTABLE { return turntable(s, layer, x, y, t, row); }
     let simulated = m == M_FLUID || m == M_REACTION || m == M_LIFE || m == M_FIRE || m == M_SLIME || m == M_SAND
-        || m == M_CRYSTAL || m == M_INK;
+        || m == M_CRYSTAL || m == M_INK || m == M_LENIA;
     // Far from flat art there is nothing to draw: not even glow or shadow.
     // Art too fine for the field to find any edge is drawn regardless.
     let reach = max(pf(s + S_GLOW), 1.0) * 6.0 + max(pf(s + S_WIDTH), 1.0) * 3.0;

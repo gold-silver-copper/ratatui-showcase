@@ -9,6 +9,7 @@ mod fx;
 mod glyph_table;
 mod glyphs;
 mod gpu;
+mod noise;
 mod num;
 mod params;
 mod profile;
