@@ -366,3 +366,72 @@ fn splat_light(s: u32, x: f32, y: f32) -> vec3<f32> {
     let light = log(1.0 + count) / log(1.0 + typical * 6.0);
     return sample(s, index * 0.85 + time() * 0.02) * clamp(light, 0.0, 1.4);
 }
+
+// ---------------------------------------------------------------- particle life
+//
+// Four kinds of particle, each drawn to or pushed from every other kind by a
+// rule the scene's variant picks. A few thousand particles, each feeling
+// every other: forces in one pass (velocities only), moves in the next, so
+// no particle reads a position while it changes. They share the flame
+// points' state and histogram.
+
+@compute @workgroup_size(64)
+fn bins_clear(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
+    if i >= bins_w() * bins_h() * BIN_WORDS { return; }
+    atomicStore(&bins[i], 0u);
+}
+
+/// How kind `a` feels kind `b`: -1 flees, 1 chases.
+fn affinity(a: u32, b: u32) -> f32 { return hash(variant(splat_scene()) * 16u + a * 4u + b, 77u) * 2.0 - 1.0; }
+
+/// Particle `i`, started somewhere random when its backdrop is new.
+fn life_particle(i: u32) -> vec4<f32> {
+    let st = state[params[H_FLAME] + i];
+    if splat_changed() || (st.x == 0.0 && st.y == 0.0) {
+        return vec4(hash(i, 41u) * width(), hash(i, 42u) * height(), 0.0, 0.0);
+    }
+    return st;
+}
+
+@compute @workgroup_size(64)
+fn life_forces(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
+    let n = params[H_FLAME_THREADS];
+    if i >= n { return; }
+    let size = vec2(width(), height());
+    let reach = min(size.x, size.y) * 0.12;
+    let me = life_particle(i);
+    let kind = i % 4u;
+    var force = vec2(0.0);
+    for (var j = 0u; j < n; j++) {
+        if j == i { continue; }
+        // The screen wraps around: the nearest copy of the other particle.
+        var d = life_particle(j).xy - me.xy;
+        d -= size * round(d / size);
+        let r = length(d) / reach;
+        if r >= 1.0 || r < 1e-4 { continue; }
+        // Too close pushes apart whatever the kinds; further out the rule
+        // pulls or pushes, strongest halfway.
+        let pull = select(affinity(kind, j % 4u) * (1.0 - abs(2.0 * r - 1.3) / 0.7), r / 0.3 - 1.0, r < 0.3);
+        force += d / (r * reach) * pull;
+    }
+    // Friction, then the forces, per sixtieth of a second.
+    let vel = me.zw * 0.7 + force * reach * 0.012;
+    state[params[H_FLAME] + i] = vec4(me.xy, vel);
+}
+
+@compute @workgroup_size(64)
+fn life_move(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
+    if i >= params[H_FLAME_THREADS] { return; }
+    let size = vec2(width(), height());
+    let st = state[params[H_FLAME] + i];
+    let pos = (st.xy + st.zw + size) % size;
+    state[params[H_FLAME] + i] = vec4(pos, st.zw);
+    // A small dot, four samples.
+    let c = f32(i % 4u) * 0.25 + 0.1;
+    for (var k = 0u; k < 4u; k++) {
+        hist_add(pos + vec2(f32(k % 2u), f32(k / 2u)), c);
+    }
+}

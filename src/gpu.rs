@@ -17,6 +17,8 @@
 //! - cover, color: scratch where particles are splatted
 //! - hist: hit counts of flames and attractors, fading frame to frame
 //! - frames: this frame's final image and the last one, packed to 8 bits
+//! - bins: particles counted per 16 x 16 samples, so particle life and boids
+//!   can feel their neighbours without visiting every other particle
 //!
 //! What has to stay in step with the GPU's state (whether a simulation has
 //! started, which ping-pong buffer is current) is decided on the GPU, from
@@ -51,7 +53,7 @@ use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::shader::Shader;
 
-use crate::backdrop::{self, BACKDROPS};
+use crate::backdrop::{self, BACKDROPS, Backdrop};
 use crate::glyphs::Glyphs;
 use crate::num;
 use crate::params::{FROM, H, HEADER, Region, TO, Words};
@@ -81,6 +83,8 @@ const LIFE_EVERY: u64 = 3;
 /// Flame and attractor points, and the steps each takes per frame.
 const FLAME_THREADS: u32 = 65_536;
 const FLAME_STEPS: u32 = 24;
+/// Particle life's particles: each feels every other, so few.
+const LIFE: u32 = 3072;
 /// How much of the flame histogram survives a sixtieth of a second.
 const FLAME_FADE: f32 = 0.88;
 /// Bloom levels, each half the size of the one before.
@@ -242,7 +246,8 @@ fn jumps(extent: u32) -> Vec<Pass> {
 fn phase(p: &Pass) -> &'static str {
     match p.entry {
         "clear" | "particles" | "swarm" => "particles",
-        "splat_fade" | "flame" => "flames",
+        "splat_fade" | "flame" | "life_forces" | "life_move" => "flames",
+        "bins_clear" => "particles",
         "field_cover" | "field_seed" | "field_jump" | "field_finish" => "fields",
         "backdrops" => "backdrops",
         "scene" => "scene",
@@ -260,6 +265,9 @@ fn all_passes() -> Vec<Pass> {
         "swarm",
         "splat_fade",
         "flame",
+        "bins_clear",
+        "life_forces",
+        "life_move",
         "field_cover",
         "field_seed",
         "field_finish",
@@ -321,6 +329,7 @@ struct Job {
     color: Handle<ShaderBuffer>,
     hist: Handle<ShaderBuffer>,
     frames: Handle<ShaderBuffer>,
+    bins: Handle<ShaderBuffer>,
     /// Size of the state buffer in vec4s.
     state: u64,
     passes: Vec<(Pass, u32)>,
@@ -333,7 +342,7 @@ struct Job {
 #[derive(Default)]
 pub struct Tracker {
     readback: Option<Entity>,
-    cells: usize,
+    size: (u16, u16),
     inputs: Option<(u64, u64, bool, u64)>,
     offsets: Inputs,
     homes: (u64, Vec<u32>),
@@ -357,6 +366,8 @@ struct Inputs {
     points: u32,
     homes: u32,
     homes_count: u32,
+    text: u32,
+    text_len: u32,
 }
 
 /// The CPU's side of the GPU renderer.
@@ -405,6 +416,7 @@ fn setup(
         color: add(),
         hist: add(),
         frames: add(),
+        bins: add(),
         state: 1,
         passes: Vec::new(),
         shader: SHADER,
@@ -529,6 +541,14 @@ impl Layout {
     }
 }
 
+/// Words in the bins buffer: 17 (`BIN_WORDS`) for each 16 x 16 samples,
+/// that is 4 x 2 cells.
+fn bin_words(cols: u16, rows: u16) -> usize {
+    usize::from(cols.div_ceil(4))
+        .saturating_mul(usize::from(rows.div_ceil(2)))
+        .saturating_mul(17)
+}
+
 /// Bytes each buffer needs for `cells` cells: state, hist, frames, cover.
 fn sizes(state: u64, cells: usize) -> [u64; 4] {
     let cells = u64::try_from(cells).unwrap_or(u64::MAX);
@@ -601,11 +621,17 @@ impl Gpu<'_, '_> {
                 None
             }
         };
-        let sim = owner(|s| s.act.mode.simulates());
+        // The simulation: a transition's own, else the scene's that owns it,
+        // with its mode and an id that changes when it must start afresh.
+        let transit = crossing.and_then(|c| c.kind.simulation());
+        let sim: Option<(Mode, usize, u64)> = match transit {
+            Some(mode) => Some((mode, TO, (from.id << 32 | to.id) | 1 << 63)),
+            None => owner(|s| s.act.mode.simulates()).map(|(s, slot)| (s.act.mode, slot, s.id)),
+        };
         let swarm = owner(|s| s.act.mode == Mode::Swarm);
         let splat = owner(|s| s.act.backdrop.splatted());
         self.upload_inputs(glyphs, from, to, crossing, swarm.map(|(s, _)| s));
-        self.resize(cells);
+        self.resize(cols, rows);
         let (born_from, born_to) = (self.born(from.id, frame.now), self.born(to.id, frame.now));
         self.tracker
             .born
@@ -617,7 +643,7 @@ impl Gpu<'_, '_> {
         tracker.clock += f64::from(frame.dt.min(0.25));
         let mut ticks = num::floor_u32(num::narrow(tracker.clock * TICKS)).min(MAX_TICKS);
         tracker.clock = (tracker.clock - f64::from(ticks) / TICKS).min(1.0 / TICKS);
-        let fresh = sim.is_some_and(|(s, _)| s.id != tracker.sim);
+        let fresh = sim.is_some_and(|(_, _, id)| id != tracker.sim);
         if fresh {
             // A new simulation starts this frame, whatever the clock says.
             ticks = ticks.max(1);
@@ -628,11 +654,11 @@ impl Gpu<'_, '_> {
         let grid = num::u32_of(cells.saturating_mul(8));
         let mut sims = Vec::new();
         let mut steps = 0;
-        if let Some((stage, _)) = sim {
-            tracker.sim = stage.id;
+        if let Some((mode, _, id)) = sim {
+            tracker.sim = id;
             let stepped =
                 |entry: &'static str, n: u32| (0..n).map(move |k| (flipped(entry, k % 2), grid));
-            match stage.act.mode {
+            match mode {
                 Mode::Fluid => {
                     for _ in 0..ticks {
                         sims.extend(
@@ -654,7 +680,7 @@ impl Gpu<'_, '_> {
                     sims.extend(stepped("reaction", steps));
                 }
                 Mode::Life | Mode::Fire | Mode::Ripple => {
-                    let (entry, due) = match stage.act.mode {
+                    let (entry, due) = match mode {
                         Mode::Life => (
                             "life",
                             (tracker.ticks / LIFE_EVERY).saturating_sub(before / LIFE_EVERY),
@@ -714,8 +740,8 @@ impl Gpu<'_, '_> {
         put(H::Dither, u32::from(frame.dither));
         put(H::Swarm, if swarm.is_some() { SWARM } else { 0 });
         put(H::SwarmScene, swarm.map_or(0, |(_, slot)| block(slot)));
-        put(H::SimScene, sim.map_or(0, |(_, slot)| block(slot)));
-        put(H::SimId, sim.map_or(0, |(s, _)| low(s.id)));
+        put(H::SimScene, sim.map_or(0, |(_, slot, _)| block(slot)));
+        put(H::SimId, sim.map_or(0, |(_, _, id)| low(id ^ id >> 32)));
         put(H::SimSteps, steps);
         put(H::FieldKey, if still { low(to.id) } else { 0 });
         put(
@@ -734,9 +760,16 @@ impl Gpu<'_, '_> {
         put(H::OrbitLen, offsets.orbit_len);
         put(
             H::FlameThreads,
-            if splat.is_some() { FLAME_THREADS } else { 0 },
+            match splat {
+                Some((s, _)) if s.act.backdrop == Backdrop::ParticleLife => LIFE,
+                Some(_) => FLAME_THREADS,
+                None => 0,
+            },
         );
-        put(H::FlameSteps, FLAME_STEPS);
+        let living = splat.is_some_and(|(s, _)| s.act.backdrop == Backdrop::ParticleLife);
+        put(H::FlameSteps, if living { 4 } else { FLAME_STEPS });
+        put(H::InText, offsets.text);
+        put(H::TextLen, offsets.text_len);
         for (i, &start) in layout.regions.iter().enumerate() {
             header.put(H::Regions.at().saturating_add(i), start);
         }
@@ -762,7 +795,14 @@ impl Gpu<'_, '_> {
         if swarm.is_some() {
             passes.push((pass("swarm"), SWARM));
         }
-        if splat.is_some() {
+        let living = splat.is_some_and(|(s, _)| s.act.backdrop == Backdrop::ParticleLife);
+        if living {
+            passes.extend([
+                (pass("splat_fade"), image),
+                (pass("life_forces"), LIFE),
+                (pass("life_move"), LIFE),
+            ]);
+        } else if splat.is_some() {
             passes.extend([(pass("splat_fade"), image), (pass("flame"), FLAME_THREADS)]);
         }
         let extent = u32::from(cols)
@@ -772,7 +812,10 @@ impl Gpu<'_, '_> {
         passes.extend(jumps(extent).into_iter().map(|p| (p, grid)));
         passes.extend([(pass("field_finish"), grid), (pass("backdrops"), grid)]);
         // The old scene's simulation, frozen as the new one's starts.
-        if crossing.is_some() && from.act.mode.simulates() && to.act.mode.simulates() {
+        if crossing.is_some()
+            && from.act.mode.simulates()
+            && sim.is_some_and(|(_, _, id)| id != from.id)
+        {
             passes.push((pass("snapshot"), grid));
         }
         passes.extend(sims);
@@ -831,6 +874,10 @@ impl Gpu<'_, '_> {
         let mut data = glyphs.pack();
         let ascii = num::u32_of(data.len());
         data.extend(glyphs.pack_ascii());
+        let text = num::u32_of(data.len());
+        let readme = Glyphs::pack_text();
+        let text_len = num::u32_of(readme.len());
+        data.extend(readme);
         let orbit = num::u32_of(data.len());
         data.extend_from_slice(&self.tracker.orbit);
         let art = num::u32_of(data.len());
@@ -858,17 +905,20 @@ impl Gpu<'_, '_> {
             points,
             homes,
             homes_count,
+            text,
+            text_len,
         };
         let handle = self.job.inputs.clone();
         self.replace(&handle, data);
     }
 
     /// Makes the per-cell buffers and the readback fit `cells` cells.
-    fn resize(&mut self, cells: usize) {
-        if cells == self.tracker.cells && self.tracker.readback.is_some() {
+    fn resize(&mut self, cols: u16, rows: u16) {
+        let cells = usize::from(cols).saturating_mul(usize::from(rows));
+        if (cols, rows) == self.tracker.size && self.tracker.readback.is_some() {
             return;
         }
-        self.tracker.cells = cells;
+        self.tracker.size = (cols, rows);
         let output = self.buffers.add(buffer(vec![
             0;
             cells
@@ -881,6 +931,7 @@ impl Gpu<'_, '_> {
         self.job.color = self.buffers.add(buffer(vec![0; cells.saturating_mul(8)]));
         self.job.hist = self.buffers.add(buffer(vec![0; cells.saturating_mul(64)]));
         self.job.frames = self.buffers.add(buffer(vec![0; cells.saturating_mul(64)]));
+        self.job.bins = self.buffers.add(buffer(vec![0; bin_words(cols, rows)]));
         if let Some(old) = self.tracker.readback.take() {
             self.commands.entity(old).despawn();
         }
@@ -944,6 +995,7 @@ fn init_pipelines(mut commands: Commands) {
             (
                 read(),
                 read(),
+                write(),
                 write(),
                 write(),
                 write(),
@@ -1056,14 +1108,24 @@ fn prepare_bind_group(
             .get(handle)
             .map(|b| b.buffer.as_entire_buffer_binding())
     };
-    let (Some(inputs), Some(output), Some(cover), Some(color), Some(hist), Some(frames)) = (
+    let (
+        Some(inputs),
+        Some(output),
+        Some(cover),
+        Some(color),
+        Some(hist),
+        Some(frames),
+        Some(bins),
+    ) = (
         get(&job.inputs),
         get(&job.output),
         get(&job.cover),
         get(&job.color),
         get(&job.hist),
         get(&job.frames),
-    ) else {
+        get(&job.bins),
+    )
+    else {
         commands.remove_resource::<Bound>();
         return;
     };
@@ -1079,6 +1141,7 @@ fn prepare_bind_group(
             color,
             hist,
             frames,
+            bins,
         )),
     );
     commands.insert_resource(Bound(bind_group));

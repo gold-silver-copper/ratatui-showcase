@@ -522,7 +522,14 @@ fn change(
         // Rarely needed: most clocks start over during a cell transition.
         show.rebase(now, 1800.0);
         let to = next;
-        let kind = pick(KINDS, None).unwrap_or(transition::Kind::Morph);
+        // Transitions that run a simulation need it to themselves.
+        let busy = from.act.mode.simulates() || to.act.mode.simulates();
+        let kinds: Vec<transition::Kind> = KINDS
+            .iter()
+            .copied()
+            .filter(|k| !busy || k.simulation().is_none())
+            .collect();
+        let kind = pick(&kinds, None).unwrap_or(transition::Kind::Morph);
         show.crossing = Some(Crossing::new(kind, from, &to));
         show.stage = Some(to);
         show.phase = Phase::Crossing;

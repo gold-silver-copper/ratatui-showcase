@@ -43,25 +43,32 @@ fn neighbours(base: u32, gx: i32, gy: i32) -> array<vec4<f32>, 4> {
 fn fluid_advect(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
     let i = thread(id, groups);
     if i >= grid_w() * grid_h() { return; }
-    if reset() {
-        state[at(H_SIM1, i)] = vec4(0.0);
-        state[at(H_SIM3, i)] = vec4(0.0);
-        return;
-    }
     let p = grid_point(i);
     let t = time();
+    let dissolving = kind() == K_DISSOLVE;
+    if reset() {
+        // Dissolving: the old scene's art becomes the dye.
+        var dye = vec3(0.0);
+        if dissolving {
+            let a = art(H_FROM, 0u, p.x, p.y, t, u32(p.y / 4.0));
+            dye = a.color * a.alpha + a.glow;
+        }
+        state[at(H_SIM1, i)] = vec4(0.0);
+        state[at(H_SIM3, i)] = vec4(dye, 1.0);
+        return;
+    }
     let v = state[at(H_SIM0, i)].xy;
     let back = p - v * SIM_DT * 2.0;
     var velocity = grid_sample(H_SIM0, back).xy * 0.994;
-    var dye = grid_sample(H_SIM2, back).rgb * 0.982;
+    var dye = grid_sample(H_SIM2, back).rgb * select(0.982, 0.995, kind() == K_DISSOLVE);
     // Eddies: the curl of drifting noise, which swirls without pushing the
     // dye anywhere in particular.
     let q = p * 0.025 + vec2(t * 0.07, -t * 0.05);
     let e = 0.5;
     let dx = fbm(q + vec2(e, 0.0)) - fbm(q - vec2(e, 0.0));
     let dy = fbm(q + vec2(0.0, e)) - fbm(q - vec2(0.0, e));
-    velocity += vec2(dy, -dx) * 240.0 * SIM_DT;
-    if inside_sim(p) {
+    velocity += vec2(dy, -dx) * select(240.0, 900.0, dissolving) * SIM_DT;
+    if !dissolving && inside_sim(p) {
         dye = mix(dye, ink_at(sim_scene(), p.x, p.y, t) * 0.85, 0.1);
     }
     state[at(H_SIM1, i)] = vec4(velocity, 0.0, 0.0);
@@ -225,7 +232,7 @@ fn fire(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) g
     let drift = i32(floor(r * 3.0)) - 1;
     let below = grid_load(src, gx + drift, gy + 1);
     var heat: f32;
-    if inside_sim(p) {
+    if fire_source(p) {
         heat = 0.8 + 0.2 * r;
     } else if gy == i32(grid_h()) - 1 {
         heat = 0.45 * r;
@@ -235,6 +242,16 @@ fn fire(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) g
     // Smoke: what the flames lose rises on, slowly thinning.
     let smoke = below.y * 0.975 + max(below.x - max(heat, 0.0), 0.0) * 0.35;
     state[at(dst, i)] = vec4(max(heat, 0.0), clamp(smoke, 0.0, 1.0), 0.0, 0.0);
+}
+
+/// Where the fire is fed: the scene's art, or during an inferno the edge
+/// where the old scene is burning away.
+fn fire_source(p: vec2<f32>) -> bool {
+    if kind() == K_INFERNO {
+        let m = wipe_mix(p.x / width(), p.y / height());
+        return m > 0.03 && m < 0.55;
+    }
+    return inside_sim(p);
 }
 
 // ---------------------------------------------------------------- ripples

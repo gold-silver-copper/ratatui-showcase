@@ -126,6 +126,32 @@ fn scene(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) 
         alpha = min(weight, 1.0);
     }
 
+    // Transitions that draw over both scenes.
+    if k == K_INFERNO {
+        let cell = grid_sample(sim_latest(), p);
+        let flame = clamp(cell.x * 1.8, 0.0, 1.0);
+        let fire = fire_color(H_TO, cell.x);
+        ink = mixl(ink, fire, flame / max(alpha + flame, 1e-3));
+        alpha = max(alpha, flame);
+        base += fire * cell.x * 0.3 + vec3(clamp(cell.y, 0.0, 0.6) * 0.15);
+    } else if k == K_DISSOLVE {
+        let dye = grid_sample(H_SIM2, p).rgb;
+        let strength = max(dye.r, max(dye.g, dye.b));
+        let a = clamp(strength * 1.6, 0.0, 1.0) * (1.0 - smoothstep(0.55, 1.0, progress()));
+        ink = mixl(ink, dye / max(strength, 1e-3) * min(strength * 1.3, 1.0), a / max(alpha + a, 1e-3));
+        alpha = max(alpha, a);
+    } else if k == K_PAGE_CURL {
+        let c = curl(p);
+        if c.z == 1.0 {
+            // The back of the page: paper, the print showing through, darker
+            // toward the fold.
+            ink = mixl(ink * 0.35 + vec3(0.62, 0.6, 0.56), WHITE * 0.9, 0.2) * (0.6 + 0.4 * c.w);
+            alpha = 1.0;
+        } else if c.z == 0.0 {
+            base *= 1.0 - 0.55 * (1.0 - smoothstep(0.0, 0.8, c.w));
+        }
+    }
+
     // Particles splatted this frame.
     if is_particles(k) || params[H_SWARM] > 0u {
         let cell = (sy / ROWS) * params[H_COLS] + sx / COLS;

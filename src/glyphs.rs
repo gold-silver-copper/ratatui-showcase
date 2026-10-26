@@ -145,6 +145,21 @@ impl Glyphs {
             .collect()
     }
 
+    /// The README as one line of characters, for the text look.
+    pub fn pack_text() -> Vec<u32> {
+        let readme = include_str!("../README.md");
+        let words: Vec<&str> = readme
+            .split_whitespace()
+            .filter(|w| !w.starts_with("](") && !w.starts_with('|') && !w.starts_with("```"))
+            .collect();
+        words
+            .join(" ")
+            .chars()
+            .filter(|c| c.is_ascii_graphic() || *c == ' ')
+            .map(u32::from)
+            .collect()
+    }
+
     pub fn ascii_len(&self) -> u32 {
         num::u32_of(self.ascii.len())
     }

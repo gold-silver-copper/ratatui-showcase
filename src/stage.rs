@@ -56,6 +56,12 @@ pub enum Look {
     Shapes,
     /// Falling code, lit by the picture.
     Code,
+    /// Contour lines, like a map's, in box-drawing characters.
+    Contour,
+    /// Printed halftone dots, bigger where it is brighter.
+    Halftone,
+    /// The picture spelled out in this project's README.
+    Text,
 }
 
 pub const LOOKS: &[Look] = &[
@@ -70,6 +76,9 @@ pub const LOOKS: &[Look] = &[
     Look::Led,
     Look::Shapes,
     Look::Code,
+    Look::Contour,
+    Look::Halftone,
+    Look::Text,
 ];
 
 impl Look {
@@ -82,6 +91,9 @@ impl Look {
         Look::Led,
         Look::Shapes,
         Look::Code,
+        Look::Contour,
+        Look::Halftone,
+        Look::Text,
     ];
 
     pub fn code(self) -> u32 {
@@ -97,6 +109,9 @@ impl Look {
             Look::Led => "led",
             Look::Shapes => "shapes",
             Look::Code => "code",
+            Look::Contour => "contour",
+            Look::Halftone => "halftone",
+            Look::Text => "text",
         }
     }
 }

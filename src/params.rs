@@ -74,6 +74,9 @@ slots! {
         OrbitLen,
         FlameThreads,
         FlameSteps,
+        /// The README's characters, for the text look.
+        InText,
+        TextLen,
         /// Where each region of `state` starts (`Region`).
         Regions: 18,
     }

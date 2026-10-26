@@ -153,6 +153,45 @@ fn encode(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups)
                 fg = bg * 2.2 + vec3(0.04);
             }
         }
+        case L_CONTOUR: {
+            // Marching squares on the cell's quarters: where brightness
+            // crosses a band, a line runs between the quarters it divides.
+            var q = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+            for (var i = 0u; i < SAMPLES; i++) {
+                let k = select(0u, 1u, i % COLS >= 2u) + select(0u, 2u, i / COLS >= 4u);
+                q[k] += luma(c[i]) / 8.0;
+            }
+            let bands = 7.0;
+            let top = floor(max(max(q[0], q[1]), max(q[2], q[3])) * bands);
+            var case_ = 0u;
+            for (var k = 0u; k < 4u; k++) {
+                if floor(q[k] * bands) >= top { case_ |= 1u << k; }
+            }
+            // Bits: 1 top left, 2 top right, 4 bottom left, 8 bottom right.
+            let lines = array<u32, 16>(0x20u, 0x256fu, 0x2570u, 0x2500u, 0x256eu, 0x2502u, 0x2571u, 0x256du,
+                0x256du, 0x2572u, 0x2502u, 0x256eu, 0x2500u, 0x2570u, 0x256fu, 0x20u);
+            glyph = lines[case_];
+            let picture = sqrt(lin_mean);
+            fg = lerp(picture * 1.6 + vec3(0.05), WHITE, 0.1);
+            bg = picture * 0.18;
+        }
+        case L_HALFTONE: {
+            let dots = array<u32, 5>(0x20u, 0xb7u, 0x2219u, 0x2022u, 0x25cfu);
+            let picture = sqrt(lin_mean);
+            let level = clamp(luma(picture) * 1.5, 0.0, 1.0);
+            glyph = dots[min(u32(round(level * 5.0)), 4u)];
+            fg = picture / max(max(picture.r, max(picture.g, picture.b)), 0.05) * 0.95;
+            bg = picture * 0.12;
+        }
+        case L_TEXT: {
+            // The README, left to right, a line per row, drifting slowly.
+            let n = max(params[H_TEXT_LEN], 1u);
+            let at = (cell + u32(time() * 2.0)) % n;
+            glyph = inputs[params[H_IN_TEXT] + at];
+            let picture = sqrt(lin_mean);
+            fg = lerp(picture * 1.5, WHITE, 0.05);
+            bg = picture * 0.1;
+        }
         default: {
             // Falling code, lit by the picture underneath.
             let t = time();
