@@ -139,12 +139,33 @@ fn hit(s: u32, x: f32, y: f32, t: f32) -> Hit {
     return best;
 }
 
+/// Near the art's edge, the signed distance to it measured on the art's
+/// own pixels instead of read from the coarse field `d`, so corners stay
+/// sharp; further out, `d`.
+fn crisp(h: Hit, d: f32) -> f32 {
+    if abs(d) > 3.5 { return d; }
+    let inside = (h.px & 0xffu) >= 128u;
+    let base = floor(h.l);
+    var nearest = 4.0;
+    for (var dy = -3; dy <= 3; dy++) {
+        for (var dx = -3; dx <= 3; dx++) {
+            let c = base + vec2(f32(dx), f32(dy)) + 0.5;
+            if ((texel(h.p, c) & 0xffu) >= 128u) != inside {
+                // The edge runs halfway between the two pixels.
+                nearest = min(nearest, max(distance(h.l, c) - 0.5, 0.0));
+            }
+        }
+    }
+    return select(nearest, -nearest, inside);
+}
+
 /// The art of scene `s` (as `layer`) drawn flat at `(x, y)`.
 fn art(s: u32, layer: u32, x: f32, y: f32, t: f32, row: u32) -> Art {
     let h = hit(s, x, y, t);
     let uv = h.l / vec2(max(h.p.w, 1.0), max(h.p.h, 1.0));
     let ink = shade_ink(s, uv.x, clamp(uv.y, 0.0, 1.0), t, row);
-    let d = sdf(layer, x, y);
+    let field = sdf(layer, x, y);
+    let d = select(field, crisp(h, field), style(s) == ST_OUTLINE || style(s) == ST_NEON);
     let radius = max(pf(s + S_GLOW), 1.0);
     let width = max(pf(s + S_WIDTH), 1.0);
     var out = Art(material(s, h.px, ink, t), f32(h.px & 0xffu) / 255.0, vec3(0.0), 0.0, 0.0);

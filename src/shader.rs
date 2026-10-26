@@ -89,6 +89,11 @@ fn prelude() -> String {
         "Agents",
         usize::try_from(crate::gpu::AGENTS).unwrap_or(0),
     );
+    put(
+        "",
+        "LeniaRadius",
+        usize::try_from(crate::gpu::LENIA_RADIUS).unwrap_or(0),
+    );
     let index = |code: u32| usize::try_from(code).unwrap_or(0);
     for (i, b) in BACKDROPS.iter().enumerate() {
         put("B_", &format!("{b:?}"), i);

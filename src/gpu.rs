@@ -55,6 +55,7 @@ use bevy::shader::Shader;
 
 use crate::backdrop::{self, BACKDROPS, Backdrop};
 use crate::glyphs::Glyphs;
+use crate::noise;
 use crate::num;
 use crate::params::{FROM, H, HEADER, Region, TO, Words};
 use crate::profile::{self, Queries, Timings};
@@ -304,6 +305,7 @@ fn all_passes() -> Vec<Pass> {
         "slime_agents",
         "slime_diffuse",
         "crystal",
+        "lenia",
     ] {
         passes.extend((0..MAX_TICKS).map(|k| numbered(entry, k)));
     }
@@ -359,6 +361,7 @@ pub struct Tracker {
     offsets: Inputs,
     homes: (u64, Vec<u32>),
     orbit: Vec<u32>,
+    noise: Vec<f32>,
     born: Vec<(u64, f64)>,
     frame: u32,
     /// Seconds of simulation not yet stepped, ticks stepped so far, and
@@ -380,6 +383,8 @@ struct Inputs {
     homes_count: u32,
     text: u32,
     text_len: u32,
+    noise: u32,
+    kernel: u32,
 }
 
 /// The CPU's side of the GPU renderer.
@@ -570,6 +575,32 @@ fn sand_blocks(cols: u16, rows: u16) -> u32 {
         .saturating_mul(u32::from(rows).saturating_mul(2).saturating_add(1))
 }
 
+/// Lenia's kernel radius in grid points.
+pub const LENIA_RADIUS: i32 = 7;
+
+/// Lenia's kernel: a smooth ring, `exp(4 - 1 / (r (1 - r)))` at distance
+/// `r` (in kernel radii), normalised to sum to 1, row by row over
+/// `(2R + 1)^2` points.
+fn lenia_kernel() -> Vec<f32> {
+    let span = -LENIA_RADIUS..=LENIA_RADIUS;
+    let raw: Vec<f32> = span
+        .clone()
+        .flat_map(|dy| span.clone().map(move |dx| (dx, dy)))
+        .map(|(dx, dy)| {
+            let squared = dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy));
+            let r = f32::from(i16::try_from(squared).unwrap_or(i16::MAX)).sqrt()
+                / f32::from(i16::try_from(LENIA_RADIUS).unwrap_or(1));
+            if r > 0.0 && r < 1.0 {
+                (4.0 - 1.0 / (r * (1.0 - r))).exp()
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let total: f32 = raw.iter().sum();
+    raw.into_iter().map(|k| k / total.max(1e-6)).collect()
+}
+
 /// Bytes each buffer needs for `cells` cells: state, hist, frames, cover.
 fn sizes(state: u64, cells: usize) -> [u64; 4] {
     let cells = u64::try_from(cells).unwrap_or(u64::MAX);
@@ -740,6 +771,10 @@ impl Gpu<'_, '_> {
                     // Its threads also reset the crystal grid.
                     sims.extend(numbered_steps("crystal", steps, AGENTS.max(grid)));
                 }
+                Mode::Lenia => {
+                    steps = ticks.min(MAX_TICKS);
+                    sims.extend(numbered_steps("lenia", steps, grid));
+                }
                 Mode::Flat | Mode::Turntable | Mode::Swarm | Mode::Boids => {}
             }
         }
@@ -809,6 +844,8 @@ impl Gpu<'_, '_> {
         );
         let living = splat.is_some_and(|(s, _)| s.act.backdrop == Backdrop::ParticleLife);
         put(H::FlameSteps, if living { 4 } else { FLAME_STEPS });
+        put(H::InNoise, offsets.noise);
+        put(H::InKernel, offsets.kernel);
         put(H::InText, offsets.text);
         put(H::TextLen, offsets.text_len);
         for (i, &start) in layout.regions.iter().enumerate() {
@@ -908,6 +945,9 @@ impl Gpu<'_, '_> {
         if self.tracker.orbit.is_empty() {
             self.tracker.orbit = backdrop::reference_orbit();
         }
+        if self.tracker.noise.is_empty() {
+            self.tracker.noise = noise::mask();
+        }
         let key = (
             from.id,
             to.id,
@@ -925,6 +965,10 @@ impl Gpu<'_, '_> {
         let readme = Glyphs::pack_text();
         let text_len = num::u32_of(readme.len());
         data.extend(readme);
+        let noise = num::u32_of(data.len());
+        data.extend(self.tracker.noise.iter().map(|v| v.to_bits()));
+        let kernel = num::u32_of(data.len());
+        data.extend(lenia_kernel().into_iter().map(f32::to_bits));
         let orbit = num::u32_of(data.len());
         data.extend_from_slice(&self.tracker.orbit);
         let art = num::u32_of(data.len());
@@ -954,6 +998,8 @@ impl Gpu<'_, '_> {
             homes_count,
             text,
             text_len,
+            noise,
+            kernel,
         };
         let handle = self.job.inputs.clone();
         self.replace(&handle, data);

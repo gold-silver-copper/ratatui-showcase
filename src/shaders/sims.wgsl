@@ -331,6 +331,13 @@ fn sim_art(s: u32, layer: u32, x: f32, y: f32, t: f32, row: u32, latest: u32) ->
             out.color = select(select(fumes, fire_color(s, heat), flame >= smoke), ember, a.alpha > 0.5);
             out.glow = fire_color(s, heat) * heat * 0.25;
         }
+        case M_LENIA: {
+            let a = grid_sample(latest, p).x;
+            let ink = ink_at(s, x, y, t);
+            out.alpha = smoothstep(0.04, 0.35, a);
+            out.color = mixl(ink * 0.55, lerp(ink, WHITE, 0.35), smoothstep(0.3, 0.9, a));
+            out.glow = ink * smoothstep(0.1, 0.6, a) * 0.12;
+        }
         case M_SLIME: {
             let v = grid_sample(latest, p).x;
             let ink = ink_at(s, x, y, t);
@@ -587,4 +594,53 @@ fn crystal(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups
         }
     }
     state[agent_slot(i)] = vec4(pos, 0.0, 0.0);
+}
+
+// ---------------------------------------------------------------- lenia
+//
+// Bert Chan's Lenia (Complex Systems 28, 2019): Life made continuous in
+// space, time and state. Each point measures its neighbourhood through a
+// smooth ring-shaped kernel (gpu.rs) and grows or shrinks by how close that
+// is to a sweet spot; gliding, pulsing creatures emerge. They start as the
+// letters, crumbled.
+
+/// Growth for a neighbourhood `u`: +1 at the sweet spot, -1 far from it.
+fn lenia_growth(u: f32, mu: f32, sigma: f32) -> f32 {
+    let d = (u - mu) / sigma;
+    return 2.0 * exp(-0.5 * d * d) - 1.0;
+}
+
+@compute @workgroup_size(64)
+fn lenia(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
+    if i >= grid_w() * grid_h() { return; }
+    let dst = sim_dst();
+    let p = grid_point(i);
+    if reset() {
+        let noise = hash(i, 201u);
+        state[at(dst, i)] = vec4(select(0.0, 0.3 + 0.7 * noise, inside_sim(p) && noise > 0.25), 0.0, 0.0, 0.0);
+        return;
+    }
+    let src = sim_src();
+    let gx = i32(i % grid_w());
+    let gy = i32(i / grid_w());
+    let r = i32(LENIA_RADIUS);
+    let side = 2 * r + 1;
+    var u = 0.0;
+    for (var dy = -r; dy <= r; dy++) {
+        for (var dx = -r; dx <= r; dx++) {
+            let k = bitcast<f32>(inputs[params[H_IN_KERNEL] + u32((dy + r) * side + dx + r)]);
+            if k == 0.0 { continue; }
+            // The world wraps around.
+            let x = (gx + dx + i32(grid_w())) % i32(grid_w());
+            let y = (gy + dy + i32(grid_h())) % i32(grid_h());
+            u += k * state[params[src] + grid_index(u32(x), u32(y))].x;
+        }
+    }
+    // Sweet spots by the scene's variant: orbium-like gliders, rotating
+    // blobs, and slow amoebas.
+    let presets = array<vec2<f32>, 3>(vec2(0.15, 0.017), vec2(0.17, 0.02), vec2(0.13, 0.014));
+    let preset = presets[variant(sim_scene()) % 3u];
+    let a = state[params[src] + i].x;
+    state[at(dst, i)] = vec4(clamp(a + 0.1 * lenia_growth(u, preset.x, preset.y), 0.0, 1.0), 0.0, 0.0, 0.0);
 }

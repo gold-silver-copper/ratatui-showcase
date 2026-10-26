@@ -42,8 +42,18 @@ pub enum Backdrop {
     Marble,
     /// Circles packed in circles, zooming in.
     Apollonian,
-    /// Lace of a Kleinian group's limit set, folded and inverted.
+    /// The limit set of a Kleinian group in the Maskit slice, by Jos Leys'
+    /// escape-time algorithm.
     Kleinian,
+    /// A hyperbolic tiling of the Poincare disk, gliding.
+    Hyperbolic,
+    /// A complex function's domain colouring: phase as colour, contours of
+    /// its size.
+    Complex,
+    /// A ray-marched Mandelbox.
+    Mandelbox,
+    /// A kaleidoscopic IFS: space folded through a polyhedron's mirrors.
+    Kifs,
     /// The scene's own art, small and tiled, drifting.
     Tiles,
     /// A fractal flame of millions of points.
@@ -80,6 +90,10 @@ pub const BACKDROPS: &[Backdrop] = &[
     Backdrop::Marble,
     Backdrop::Apollonian,
     Backdrop::Kleinian,
+    Backdrop::Hyperbolic,
+    Backdrop::Complex,
+    Backdrop::Mandelbox,
+    Backdrop::Kifs,
     Backdrop::Tiles,
     Backdrop::Flame,
     Backdrop::Clifford,
@@ -123,6 +137,10 @@ impl Backdrop {
             Backdrop::Marble => "marbling",
             Backdrop::Apollonian => "apollonian",
             Backdrop::Kleinian => "kleinian",
+            Backdrop::Hyperbolic => "hyperbolic",
+            Backdrop::Complex => "domain colouring",
+            Backdrop::Mandelbox => "mandelbox",
+            Backdrop::Kifs => "kaleidoscopic ifs",
             Backdrop::Tiles => "tiles",
             Backdrop::Flame => "flame",
             Backdrop::Clifford => "clifford",

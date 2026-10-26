@@ -4,16 +4,76 @@
 // to the terminal costs time, so a cell that barely changed keeps what it
 // had, and a cell of one colour is a space with only a background.
 
-/// The table entry (mask, code point) nearest `mask`, from `count` entries
-/// at header slot `base`.
-fn nearest(base: u32, count: u32, mask: u32) -> vec2<u32> {
-    var best = vec2(0u, 0x20u);
-    var fewest = 64u;
+/// How much of the 3 x 3 samples around sample `i` of a cell `mask` covers,
+/// staying inside the cell.
+fn blurred_bit(mask: u32, i: u32) -> f32 {
+    let x = i32(i % COLS);
+    let y = i32(i / COLS);
+    var sum = 0.0;
+    var n = 0.0;
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let qx = x + dx;
+            let qy = y + dy;
+            if qx < 0 || qy < 0 || qx >= i32(COLS) || qy >= i32(ROWS) { continue; }
+            sum += f32((mask >> u32(qy * i32(COLS) + qx)) & 1u);
+            n += 1.0;
+        }
+    }
+    return sum / n;
+}
+
+/// The glyph that fits best: the eight nearest by bits, then the one whose
+/// blurred shape is closest to the blurred picture, so a stroke off by one
+/// sample still finds its glyph (after Xu, Zhang and Wong's
+/// misalignment-tolerant matching, SIGGRAPH 2010). `soft` is how far each
+/// sample lies from the background colour toward the foreground.
+fn best_glyph(base: u32, count: u32, mask: u32, soft: ptr<function, array<f32, 32>>) -> vec2<u32> {
+    var picks = array<vec2<u32>, 8>();
+    var bits = array<u32, 8>(64u, 64u, 64u, 64u, 64u, 64u, 64u, 64u);
     for (var g = 0u; g < count; g++) {
         let o = params[base] + g * 2u;
-        let m = inputs[o];
-        let d = countOneBits(m ^ mask);
-        if d < fewest { fewest = d; best = vec2(m, inputs[o + 1u]); }
+        let d = countOneBits(inputs[o] ^ mask);
+        if d >= bits[7] { continue; }
+        // Insert in order.
+        var k = 7;
+        while k > 0 && bits[k - 1] > d {
+            bits[k] = bits[k - 1];
+            picks[k] = picks[k - 1];
+            k--;
+        }
+        bits[k] = d;
+        picks[k] = vec2(inputs[o], inputs[o + 1u]);
+    }
+    var blurred = array<f32, 32>();
+    for (var i = 0u; i < SAMPLES; i++) {
+        var sum = 0.0;
+        var n = 0.0;
+        let x = i32(i % COLS);
+        let y = i32(i / COLS);
+        for (var dy = -1; dy <= 1; dy++) {
+            for (var dx = -1; dx <= 1; dx++) {
+                let qx = x + dx;
+            let qy = y + dy;
+                if qx < 0 || qy < 0 || qx >= i32(COLS) || qy >= i32(ROWS) { continue; }
+                sum += (*soft)[u32(qy * i32(COLS) + qx)];
+                n += 1.0;
+            }
+        }
+        blurred[i] = sum / n;
+    }
+    var best = picks[0];
+    var least = 1e9;
+    for (var k = 0; k < 8; k++) {
+        if bits[k] == 64u { break; }
+        let m = picks[k].x;
+        var err = 0.0;
+        for (var i = 0u; i < SAMPLES; i++) {
+            let exact = f32((m >> i) & 1u) - (*soft)[i];
+            let near = blurred_bit(m, i) - blurred[i];
+            err += near * near + 0.35 * exact * exact;
+        }
+        if err < least { least = err; best = picks[k]; }
     }
     return best;
 }
@@ -21,11 +81,20 @@ fn nearest(base: u32, count: u32, mask: u32) -> vec2<u32> {
 /// Average colour in linear light.
 fn average(sum: vec3<f32>, n: f32) -> vec3<f32> { return select(vec3(0.0), sqrt(sum / n), n > 0.0); }
 
+/// Blue noise for `cell`'s colour `which`: a 64 x 64 void-and-cluster mask
+/// (noise.rs), moved on by the golden ratio each frame, so the error is
+/// fine-grained in space and spread evenly over time.
+fn blue_noise(cell: u32, which: u32) -> f32 {
+    let x = (cell % params[H_COLS] + which * 32u) % 64u;
+    let y = (cell / params[H_COLS]) % 64u;
+    return wrap(bitcast<f32>(inputs[params[H_IN_NOISE] + y * 64u + x]) + f32(frame() % 1024u) * 0.618034);
+}
+
 fn pack(c: vec3<f32>, cell: u32, which: u32) -> u32 {
     var v = clamp(c, vec3(0.0), vec3(1.0)) * 255.0;
     // Temporal dithering: a different tiny offset each frame, so colours
     // between the representable levels average out.
-    if params[H_DITHER] == 1u { v += (hash3(cell * 2u + which, frame(), 13u) - 0.5) * 2.0; }
+    if params[H_DITHER] == 1u { v += (blue_noise(cell, which) - 0.5) * 2.0; }
     let b = vec3<u32>(clamp(v + 0.5, vec3(0.0), vec3(255.0))) & vec3(0xfeu);
     return (b.r << 16u) | (b.g << 8u) | b.b;
 }
@@ -100,7 +169,13 @@ fn encode(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups)
             if !plain {
                 let table = select(H_IN_GLYPHS, H_IN_ASCII, look == L_SHAPES);
                 let count = select(params[H_GLYPHS], params[H_ASCII_COUNT], look == L_SHAPES);
-                best = nearest(table, count, mask);
+                // Where each sample lies between the two colours.
+                var soft = array<f32, 32>();
+                let span = fg_group - bg_group;
+                for (var i = 0u; i < SAMPLES; i++) {
+                    soft[i] = clamp(dot(c[i] - bg_group, span) / max(dot(span, span), 1e-6), 0.0, 1.0);
+                }
+                best = best_glyph(table, count, mask, &soft);
             }
             let shaped = best.x != 0u && best.x != 0xffffffffu;
             if shaped {

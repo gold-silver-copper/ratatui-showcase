@@ -98,6 +98,113 @@ fn rays(p: vec2<f32>) -> vec3<f32> {
 /// sixtieth of a second, so feedback fades as fast at any frame rate.
 fn persist(per_tick: f32) -> f32 { return pow(per_tick, clamp(pf(H_DT), 0.0, 0.1) * 60.0); }
 
+fn scene_luma(p: vec2<f32>) -> f32 { return luma(img_load(H_SCENE, p).rgb); }
+
+/// The direction the picture changes fastest at `p` (x, y) and how strongly
+/// one direction dominates (z), from the structure tensor of its brightness.
+fn structure(p: vec2<f32>) -> vec3<f32> {
+    var t = vec3(0.0);
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let q = p + vec2(f32(dx), f32(dy)) * 2.0;
+            let g = vec2(scene_luma(q + vec2(2.0, 0.0)) - scene_luma(q - vec2(2.0, 0.0)),
+                scene_luma(q + vec2(0.0, 2.0)) - scene_luma(q - vec2(0.0, 2.0)));
+            t += vec3(g.x * g.x, g.y * g.y, g.x * g.y);
+        }
+    }
+    let angle = 0.5 * atan2(2.0 * t.z, t.x - t.y);
+    let spread = sqrt(max((t.x - t.y) * (t.x - t.y) + 4.0 * t.z * t.z, 0.0));
+    return vec3(cos(angle), sin(angle), spread / max(t.x + t.y, 1e-5));
+}
+
+/// Oil paint: an anisotropic Kuwahara filter (Kyprianidis, Kang and Dollner,
+/// 2009). Around each point, an ellipse stretched along the edges is cut
+/// into four sectors; the sectors that vary least carry most weight, so
+/// strokes flatten colour along edges and never across them.
+fn paint(p: vec2<f32>) -> vec3<f32> {
+    let st = structure(p);
+    let across = st.xy;
+    let along = vec2(-across.y, across.x);
+    let radius = 10.0;
+    let stretch = 1.0 + st.z * 1.5;
+    var total = vec3(0.0);
+    var weights = 0.0;
+    for (var j = 0; j < 4; j++) {
+        var sum = vec3(0.0);
+        var sq = vec3(0.0);
+        for (var k = 0; k < 9; k++) {
+            let a = (f32(j) + (f32(k % 3) + 0.5) / 3.0) * PI * 0.5;
+            let r = radius * (f32(k / 3) + 1.0) / 3.0;
+            let q = p + (along * cos(a) * stretch + across * sin(a) / stretch) * r;
+            let c = img_load(H_SCENE, q).rgb;
+            sum += c;
+            sq += c * c;
+        }
+        let mean = sum / 9.0;
+        let variance = sq / 9.0 - mean * mean;
+        let w = 1.0 / pow(1e-3 + (variance.r + variance.g + variance.b) * 40.0, 4.0);
+        total += mean * w;
+        weights += w;
+    }
+    return total / max(weights, 1e-9);
+}
+
+/// The flow at `p` for silk: the fluid's own velocity when one runs, else
+/// along the picture's edges, else slow eddies.
+fn flow(p: vec2<f32>) -> vec2<f32> {
+    let sim = params[H_SIM_SCENE];
+    if sim != 0u && (mode(sim) == M_FLUID || mode(sim) == M_INK) {
+        let v = grid_sample(H_SIM0, p).xy;
+        if dot(v, v) > 1e-4 { return v; }
+    }
+    let g = vec2(scene_luma(p + vec2(2.0, 0.0)) - scene_luma(p - vec2(2.0, 0.0)),
+        scene_luma(p + vec2(0.0, 2.0)) - scene_luma(p - vec2(0.0, 2.0)));
+    if dot(g, g) > 1e-4 { return vec2(-g.y, g.x); }
+    let n = fbm(p * 0.02 + vec2(time() * 0.05, 0.0)) * TAU * 2.0;
+    return vec2(cos(n), sin(n));
+}
+
+/// Silk: line integral convolution (Cabral and Leedom, 1993). Each point
+/// averages noise and colour along the flow line through it, both ways, so
+/// the flow shows as fine streaks; the noise's phase drifts so they run.
+fn silk(p: vec2<f32>) -> vec3<f32> {
+    var noise = 0.0;
+    var colour = vec3(0.0);
+    var n = 0.0;
+    for (var side = -1.0; side <= 1.0; side += 2.0) {
+        var q = p;
+        for (var k = 0; k < 14; k++) {
+            let v = flow(q);
+            q += normalize(v) * side * 2.0;
+            // Noise in blocks of 3 samples: finer would be averaged away
+            // inside each cell.
+            let h = hash(u32(max(q.x, 0.0) / 3.0), u32(max(q.y, 0.0) / 3.0) * 3u + 1u);
+            noise += 0.5 + 0.5 * sin(h * TAU + time() * 4.0 - f32(k) * side * 0.6);
+            colour += img_load(H_SCENE, q).rgb;
+            n += 1.0;
+        }
+    }
+    return colour / n * (0.25 + 1.5 * noise / n);
+}
+
+/// The Droste effect (after de Smit and Lenstra's reading of Escher's Print
+/// Gallery): the picture's outer ring repeats inside itself along a log
+/// spiral, each turn a copy smaller by `k`, zooming in for ever.
+fn droste(p: vec2<f32>) -> vec2<f32> {
+    let centre = art_bounds(H_TO).centre;
+    let unit = height();
+    let z = (p - centre) / unit;
+    let k = 2.6;
+    let lk = log(k);
+    let outer = log(0.5 * length(vec2(width(), height())) / unit);
+    let low = outer - lk;
+    let theta = atan2(z.y, z.x);
+    let twist = lk / TAU;
+    let rho = log(max(length(z), 1e-5)) + theta * twist;
+    let wrapped = low + wrap((rho - low + time() * 0.12) / lk) * lk - theta * twist;
+    return centre + exp(wrapped) * vec2(cos(theta), sin(theta)) * unit;
+}
+
 /// Depth of field: a disc blur as wide as the scene asked for.
 fn focused(p: vec2<f32>) -> vec3<f32> {
     let here = img_load(H_SCENE, p);
@@ -134,7 +241,10 @@ fn post(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) g
         }
     }
 
+    if effect == P_DROSTE { p = droste(p); }
     var c = focused(p);
+    if effect == P_PAINT { c = paint(p); }
+    if effect == P_SILK { c = silk(p); }
     if effect == P_CHROMA {
         let shift = (p - centre) / size * 6.0;
         c = vec3(img_load(H_SCENE, p + shift).r, c.g, img_load(H_SCENE, p - shift).b);

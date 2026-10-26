@@ -77,6 +77,9 @@ slots! {
         /// The README's characters, for the text look.
         InText,
         TextLen,
+        /// The blue-noise mask, and Lenia's kernel.
+        InNoise,
+        InKernel,
         /// Where each region of `state` starts (`Region`).
         Regions: 19,
     }

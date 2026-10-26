@@ -324,37 +324,157 @@ fn marbling(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
     return sample(s, v * 1.5 + length(q) * 0.6 + t * 0.01) * (0.25 + 0.8 * v * v);
 }
 
-/// Distance to the edges of a fractal folded by `fold` and inverted in the
-/// unit circle by `k`, and how much it was scaled, in the plane's units.
-fn inverted(p0: vec2<f32>, k: f32, kleinian: bool, box: vec2<f32>) -> vec2<f32> {
-    var p = p0;
+/// The Apollonian gasket (circles in circles), its edges lit, zooming in
+/// and back out: distance to the edges by repeated folding and inversion.
+fn apollonian(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
+    let zoom = exp(-(0.5 - 0.5 * cos(t * TAU / 90.0)) * 3.5);
+    var p = vec2(0.3, 0.2) + vec2((x - 0.5) * pf(H_ASPECT), y - 0.5) * 2.4 * zoom;
+    let k = 1.15 + 0.06 * sin(t * 0.11);
     var scale = 1.0;
     for (var i = 0; i < 10; i++) {
-        if kleinian {
-            p = 2.0 * clamp(p, -box, box) - p;
-        } else {
-            p = -1.0 + 2.0 * fract(0.5 * p + 0.5);
-        }
-        let r2 = max(dot(p, p), 1e-5);
-        let f = select(k / r2, max(k / r2, 1.0), kleinian);
+        p = -1.0 + 2.0 * fract(0.5 * p + 0.5);
+        let f = k / max(dot(p, p), 1e-5);
         p *= f;
         scale *= f;
     }
-    return vec2(0.25 * abs(p.y) / scale, scale);
+    let edge = exp(-0.25 * abs(p.y) / scale / (2.4 * zoom / f32(grid_h())) * 0.9);
+    return background(s) * 0.6 + sample(s, log2(scale) * 0.07 + t * 0.015) * (edge * 0.95 + 0.12);
 }
 
-/// The Apollonian gasket (circles in circles), or a pseudo-Kleinian limit
-/// set (box folds and inversions), its edges lit, zooming in and back.
-fn gasket(s: u32, x: f32, y: f32, t: f32, kleinian: bool) -> vec3<f32> {
-    let zoom = exp(-(0.5 - 0.5 * cos(t * TAU / 90.0)) * 3.5);
-    let centre = select(vec2(0.3, 0.2), vec2(0.0, 0.62), kleinian);
-    let p = centre + vec2((x - 0.5) * pf(H_ASPECT), y - 0.5) * 2.4 * zoom;
-    let box = vec2(0.92 + 0.04 * sin(t * 0.07), 0.9);
-    let r = inverted(p, select(1.15 + 0.06 * sin(t * 0.11), 1.0, kleinian), kleinian, box);
-    let pixel = 2.4 * zoom / f32(grid_h());
-    let edge = exp(-r.x / pixel * 0.9);
-    let shade = sample(s, log2(r.y) * 0.07 + t * 0.015);
-    return background(s) * 0.6 + shade * (edge * 0.95 + 0.12);
+/// The limit set of a Kleinian group in the Maskit slice, by Jos Leys'
+/// escape-time algorithm ("A fast algorithm for limit sets of Kleinian
+/// groups with the Maskit parametrisation", 2017): fold the point into the
+/// strip and the half that the generator maps, apply it, and repeat; points
+/// near the limit set take many steps to settle.
+fn kleinian(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
+    let u = 1.91 + 0.045 * (0.5 + 0.5 * sin(t * 0.07));
+    let v = 0.03 * sin(t * 0.05);
+    var z = vec2((x - 0.5) * pf(H_ASPECT) * 2.3 + t * 0.03, (1.0 - y) * (u + 0.2) - 0.1);
+    var lz = z + vec2(1.0);
+    var llz = z - vec2(1.0);
+    var steps = 0.0;
+    var hit = false;
+    for (var i = 0; i < 70; i++) {
+        let off = abs(v) / u * z.y;
+        let w = z.x + off + 1.0;
+        z.x = w - 2.0 * floor(w / 2.0) - 1.0 - off;
+        let side = z.x + v * 0.5;
+        let separate = u * 0.5 + sign(v) * (2.0 * u - 1.95) / 4.0 * sign(side) * (1.0 - exp(-(7.2 - (1.95 - u) * 15.0) * abs(side)));
+        if z.y >= separate { z = vec2(-v, u) - z; }
+        z = vec2(z.x, -z.y) / max(dot(z, z), 1e-9) + vec2(-v, u);
+        steps += 1.0;
+        if z.y < 0.0 { hit = true; break; }
+        if length(z - llz) < 1e-6 { break; }
+        llz = lz;
+        lz = z;
+    }
+    let depth = steps / 70.0;
+    let glow = pow(depth, 0.6);
+    return background(s) * 0.5 + sample(s, depth * 1.7 + t * 0.02) * select(glow * 0.45, glow, hit);
+}
+
+/// A hyperbolic {p, q} tiling of the Poincare disk: each point is reflected
+/// into the fundamental triangle (two lines through the centre and a circle
+/// meeting the rim at right angles), and the reflections counted colour it,
+/// while a Mobius map glides the whole plane along.
+fn hyperbolic(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
+    var z = vec2((x - 0.5) * pf(H_ASPECT), y - 0.5) * 2.15;
+    if dot(z, z) >= 1.0 { return background(s) * 0.5; }
+    let tilings = array<vec2<f32>, 5>(vec2(7.0, 3.0), vec2(5.0, 4.0), vec2(4.0, 5.0), vec2(8.0, 3.0), vec2(6.0, 4.0));
+    let pq = tilings[variant(s) % 5u];
+    let alpha = PI / pq.x;
+    let beta = PI / pq.y;
+    let r = sin(alpha) / sqrt(cos(beta) * cos(beta) - sin(alpha) * sin(alpha));
+    let centre = vec2(sqrt(1.0 + r * r), 0.0);
+    // Glide: z -> (z - a) / (1 - conj(a) z).
+    let a = vec2(cos(t * 0.03), sin(t * 0.03)) * 0.55 * sin(t * 0.07);
+    let num = z - a;
+    let den = vec2(1.0, 0.0) - vec2(a.x * z.x + a.y * z.y, a.x * z.y - a.y * z.x);
+    z = vec2(num.x * den.x + num.y * den.y, num.y * den.x - num.x * den.y) / max(dot(den, den), 1e-9);
+    z = rot(t * 0.02) * z;
+    let n = vec2(-sin(alpha), cos(alpha));
+    var flips = 0u;
+    for (var i = 0; i < 40; i++) {
+        var moved = false;
+        if z.y < 0.0 { z.y = -z.y; flips++; moved = true; }
+        let d = dot(z, n);
+        if d > 0.0 { z -= 2.0 * d * n; flips++; moved = true; }
+        let q = z - centre;
+        if dot(q, q) < r * r { z = centre + q * (r * r / dot(q, q)); flips++; moved = true; }
+        if !moved { break; }
+    }
+    let edge = min(min(abs(z.y), abs(dot(z, n))), abs(length(z - centre) - r));
+    let tile = sample(s, f32(flips % 2u) * 0.5 + 0.1 + t * 0.01) * select(0.35, 0.75, flips % 2u == 0u);
+    let line = exp(-edge * 90.0);
+    return mixl(tile, accent(s), line * 0.7) * (1.0 - 0.3 * dot(z, z));
+}
+
+/// Domain colouring of f(z) = (z^3 - c) / (z^2 + 1) with c circling: the
+/// phase picks the colour, contours of log|f| and rays of equal phase shade
+/// it, so zeros and poles stand out as pinwheels.
+fn domain_colouring(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
+    let z = vec2((x - 0.5) * pf(H_ASPECT), y - 0.5) * 3.2;
+    let c = vec2(cos(t * 0.11), sin(t * 0.11)) * 1.3;
+    let z2 = cmul(z, z);
+    let num = cmul(z2, z) - c;
+    let den = z2 + vec2(1.0, 0.0);
+    let f = vec2(num.x * den.x + num.y * den.y, num.y * den.x - num.x * den.y) / max(dot(den, den), 1e-9);
+    let phase = atan2(f.y, f.x);
+    let size = log2(max(length(f), 1e-6));
+    let rings = 0.6 + 0.4 * smoothstep(0.0, 1.0, fract(size));
+    let rays = 1.0 - 0.35 * pow(abs(cos(phase * 6.0)), 40.0);
+    return sample(s, phase / TAU + t * 0.01) * rings * rays * 0.7;
+}
+
+/// Distance to a ray-marched fractal and an orbit trap for its colour.
+fn fractal3(kind: u32, p0: vec3<f32>, t: f32) -> vec2<f32> {
+    var p = p0;
+    var trap = 1e9;
+    if kind == B_MANDELBOX {
+        let scale = -1.75 + 0.2 * sin(t * 0.05);
+        var dr = 1.0;
+        for (var i = 0; i < 10; i++) {
+            p = clamp(p, vec3(-1.0), vec3(1.0)) * 2.0 - p;
+            let r2 = dot(p, p);
+            trap = min(trap, r2);
+            if r2 < 0.25 { p *= 4.0; dr *= 4.0; } else if r2 < 1.0 { p /= r2; dr /= r2; }
+            p = p * scale + p0;
+            dr = dr * abs(scale) + 1.0;
+        }
+        return vec2(length(p) / abs(dr), trap);
+    }
+    // A kaleidoscopic IFS (Knighty's): fold through the tetrahedron's
+    // mirrors, turn, scale away from a corner, again and again.
+    let scale = 2.0;
+    let turn = rot(0.3 + 0.25 * sin(t * 0.07));
+    for (var i = 0; i < 11; i++) {
+        if p.x + p.y < 0.0 { p = vec3(-p.y, -p.x, p.z); }
+        if p.x + p.z < 0.0 { p = vec3(-p.z, p.y, -p.x); }
+        if p.y + p.z < 0.0 { p = vec3(p.x, -p.z, -p.y); }
+        let xz = turn * p.xz;
+        p = vec3(xz.x, p.y, xz.y);
+        p = p * scale - vec3(1.0) * (scale - 1.0);
+        trap = min(trap, dot(p, p));
+    }
+    return vec2(length(p) * pow(scale, -11.0), trap);
+}
+
+/// The Mandelbox or a kaleidoscopic IFS, slowly orbited.
+fn fractal_view(s: u32, x: f32, y: f32, t: f32, kind: u32) -> vec3<f32> {
+    let ray = camera_ray(x, y, t, select(3.0, 9.0, kind == B_MANDELBOX));
+    var d = 0.0;
+    var steps = 0.0;
+    var trap = 1.0;
+    var found = false;
+    for (; steps < 80.0; steps += 1.0) {
+        let res = fractal3(kind, ray[0] + ray[1] * d, t);
+        if res.x < 0.0015 * d { found = true; trap = res.y; break; }
+        d += res.x;
+        if d > 20.0 { break; }
+    }
+    let occlusion = 1.0 - steps / 80.0;
+    if !found { return background(s) + sample(s, 0.6) * pow(1.0 - occlusion, 4.0) * 0.2; }
+    return sample(s, log(1.0 + trap) * 0.6 + t * 0.02) * (0.12 + 0.88 * pow(occlusion, 1.5));
 }
 
 /// The scene's own art, small, in staggered rows drifting across.
@@ -424,8 +544,11 @@ fn backdrop(s: u32, x: f32, y: f32, px: u32, py: u32, t: f32) -> vec3<f32> {
         case B_METABALLS: { return metaballs(s, x, y, t) * 0.75; }
         case B_VORONOI: { return stained_glass(s, x, y, t) * 0.7; }
         case B_MARBLE: { return marbling(s, x, y, t) * 0.7; }
-        case B_APOLLONIAN: { return gasket(s, x, y, t, false) * 0.75; }
-        case B_KLEINIAN: { return gasket(s, x, y, t, true) * 0.75; }
+        case B_APOLLONIAN: { return apollonian(s, x, y, t) * 0.75; }
+        case B_KLEINIAN: { return kleinian(s, x, y, t) * 0.8; }
+        case B_HYPERBOLIC: { return hyperbolic(s, x, y, t) * 0.7; }
+        case B_COMPLEX: { return domain_colouring(s, x, y, t); }
+        case B_MANDELBOX, B_KIFS: { return fractal_view(s, x, y, t, params[s + S_BACKDROP]) * 0.75; }
         case B_TILES: { return tiles(s, x, y, t); }
         // Flames and attractors are drawn over this from their histogram.
         case B_FLAME, B_CLIFFORD, B_DE_JONG, B_LORENZ, B_PARTICLE_LIFE: { return background(s) * 0.7 + vec3(dither); }
