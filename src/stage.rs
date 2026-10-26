@@ -13,7 +13,7 @@ use crate::fonts::{self, Face};
 use crate::glyphs::{COLS, ROWS};
 use crate::num;
 use crate::params::{BLOCK, PIECE_LEN, S};
-use crate::theme::{Rgb, SHADERS, Shader, THEMES, Theme};
+use crate::theme::{Palette, SHADERS, Shader};
 
 pub const WORDMARK: &str = "ratatui";
 
@@ -283,7 +283,7 @@ pub const IDLES: &[Idle] = &[
 #[derive(Clone)]
 pub struct Act {
     pub subject: Subject,
-    pub theme: usize,
+    pub palette: Palette,
     pub shader: Shader,
     pub backdrop: Backdrop,
     pub look: Look,
@@ -296,11 +296,8 @@ pub struct Act {
 }
 
 impl Act {
-    pub fn theme(&self) -> &'static Theme {
-        THEMES
-            .get(self.theme)
-            .or(THEMES.first())
-            .unwrap_or(&FALLBACK)
+    pub fn theme(&self) -> &Palette {
+        &self.palette
     }
 
     pub fn label(&self) -> String {
@@ -321,13 +318,6 @@ impl Act {
         }
     }
 }
-
-const FALLBACK: Theme = Theme {
-    name: "",
-    background: Rgb::BLACK,
-    stops: &[],
-    accent: Rgb::WHITE,
-};
 
 struct Piece {
     bitmap: Bitmap,
@@ -618,7 +608,7 @@ impl Stage {
         put(S::Style.at(), self.act.style.code());
         let colors = [theme.background, theme.accent]
             .into_iter()
-            .chain(theme.stops.iter().take(MAX_STOPS).map(|&h| Rgb::hex(h)));
+            .chain(theme.stops.iter().take(MAX_STOPS).copied());
         let channels = colors.flat_map(|c| [c.0, c.1, c.2]);
         for (i, v) in channels.enumerate() {
             put(S::Background.at().saturating_add(i), v.to_bits());
@@ -679,7 +669,7 @@ mod tests {
     fn act(subject: Subject) -> Act {
         Act {
             subject,
-            theme: 0,
+            palette: Palette::generated(),
             shader: Shader::Flow,
             backdrop: Backdrop::Vignette,
             look: Look::Smooth,
