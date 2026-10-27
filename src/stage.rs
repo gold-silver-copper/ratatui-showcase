@@ -14,6 +14,7 @@ use crate::glyphs::{COLS, ROWS};
 use crate::num;
 use crate::params::{BLOCK, PIECE_LEN, S};
 use crate::theme::{Palette, SHADERS, Shader};
+use crate::zoom::{self, Aim, Picture};
 
 pub const WORDMARK: &str = "ratatui";
 
@@ -423,6 +424,9 @@ fn min_height(h: f32) -> f32 {
     (h / 6.0).max(num::float(ROWS) * 3.0)
 }
 const MAX_STOPS: usize = 5;
+/// How long, and how many tries, the search for a zoom's target may take.
+const AIM_BUDGET: std::time::Duration = std::time::Duration::from_millis(400);
+const AIM_TRIES: u32 = 400;
 
 /// An option's position in its list, which the shader switches on.
 fn code<T: PartialEq>(list: &[T], item: T) -> u32 {
@@ -454,6 +458,8 @@ pub struct Stage {
     pieces: Vec<Piece>,
     amplitude: f32,
     pub ink: Arc<InkMask>,
+    /// Where the Mandelbrot zoom dives, if a search found somewhere.
+    pub zoom: Option<Arc<Aim>>,
 }
 
 impl Stage {
@@ -548,6 +554,7 @@ impl Stage {
                 width: 0,
                 cells: vec![],
             }),
+            zoom: None,
         };
         stage.ink = Arc::new(stage.ink_mask());
         stage
@@ -591,6 +598,39 @@ impl Stage {
                 )
             },
         )
+    }
+
+    /// The box the art itself covers: `(left, top, right, bottom)`.
+    fn art_box(&self) -> (f32, f32, f32, f32) {
+        self.pieces.iter().fold(
+            (f32::MAX, f32::MAX, f32::MIN, f32::MIN),
+            |(l, t, r, b), p| {
+                (
+                    l.min(p.x),
+                    t.min(p.y),
+                    r.max(p.x + p.width()),
+                    b.max(p.y + p.height()),
+                )
+            },
+        )
+    }
+
+    /// Searches for a Mandelbrot dive that ends on a copy of this scene's
+    /// art, arriving after `dive` seconds (`zoom.rs`). Takes up to a few
+    /// hundred milliseconds: never on the frame path.
+    pub fn aim(&mut self, dive: f32, seed: u64) {
+        let ink = |x: f64, y: f64| self.coverage(num::narrow(x), num::narrow(y)) > 0.5;
+        let wide = |(l, t, r, b): (f32, f32, f32, f32)| {
+            (f64::from(l), f64::from(t), f64::from(r), f64::from(b))
+        };
+        let picture = Picture {
+            width: f64::from(self.cols) * 4.0,
+            height: f64::from(self.rows) * 8.0,
+            aspect: f64::from(self.screen_aspect()),
+            art: wide(self.art_box()),
+            ink: &ink,
+        };
+        self.zoom = zoom::aim(&picture, dive, seed, AIM_BUDGET, AIM_TRIES).map(Arc::new);
     }
 
     /// How much of the art at rest covers screen position `(x, y)`. The GPU
@@ -654,8 +694,10 @@ impl Stage {
     }
 
     /// This scene's settings for the GPU (`params::S`), with its art
-    /// starting at `art` in the art section and `age` seconds since it began.
-    pub fn block(&self, art: u32, age: f32) -> [u32; BLOCK] {
+    /// starting at `art` in the art section and `age` seconds since it began;
+    /// `orbit` is where its Mandelbrot reference orbit starts in the
+    /// inputs, and its length.
+    pub fn block(&self, art: u32, age: f32, orbit: (u32, u32)) -> [u32; BLOCK] {
         let mut block = [0; BLOCK];
         let theme = self.act.theme();
         let mut put = |at: usize, value: u32| {
@@ -689,6 +731,15 @@ impl Stage {
             .unwrap_or(0);
         put(S::Age.at(), age.to_bits());
         put(S::Variant.at(), self.act.variant);
+        put(S::Orbit.at(), orbit.0);
+        put(S::OrbitLen.at(), orbit.1);
+        if let Some(aim) = &self.zoom {
+            put(S::ZoomScale.at(), aim.scale.to_bits());
+            put(S::ZoomTurn.at(), aim.turn.to_bits());
+            put(S::ZoomSpan.at(), aim.span.to_bits());
+            put(S::ZoomDive.at(), aim.dive.to_bits());
+            put(S::ZoomLimit.at(), aim.limit);
+        }
         put(
             S::Width.at(),
             num::float((tallest / 14).clamp(2, 24)).to_bits(),

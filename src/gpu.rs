@@ -53,15 +53,16 @@ use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::shader::Shader;
 
-use crate::backdrop::{self, BACKDROPS, Backdrop};
+use crate::backdrop::{BACKDROPS, Backdrop};
 use crate::glyphs::Glyphs;
 use crate::noise;
 use crate::num;
 use crate::params::{FROM, H, HEADER, Region, TO, Words};
 use crate::profile::{self, Queries, Timings};
 use crate::shader::{self, Entry, Watch};
-use crate::stage::{Idle, Mode, Stage};
+use crate::stage::{Idle, Mode, Post, Stage};
 use crate::transition::{self, Crossing};
+use crate::zoom;
 
 const SHADER: Handle<Shader> = uuid_handle!("6f0c3b8e-2d4a-4c1e-9b7f-5a8e3d2c1b0a");
 const WORKGROUP: u32 = 64;
@@ -255,7 +256,7 @@ fn phase(p: &Pass) -> &'static str {
         "backdrops" => "backdrops",
         "scene" => "scene",
         "bloom_down" | "bloom_blur" => "bloom",
-        "post" => "post",
+        "strokes" | "post" => "post",
         "encode" | "finish" => "encode",
         _ => "sims",
     }
@@ -285,6 +286,7 @@ fn all_passes() -> Vec<Pass> {
         "fluid_project",
         "fluid_copy",
         "scene",
+        "strokes",
         "post",
         "encode",
         "finish",
@@ -374,8 +376,9 @@ pub struct Tracker {
 #[derive(Default, Clone, Copy)]
 struct Inputs {
     ascii: u32,
-    orbit: u32,
-    orbit_len: u32,
+    /// Each scene's reference orbit for the Mandelbrot zoom: where it
+    /// starts, and its length in steps.
+    orbits: [(u32, u32); 2],
     art: u32,
     points: u32,
     homes: u32,
@@ -408,6 +411,9 @@ pub struct Frame {
     pub now: f64,
     pub dt: f32,
     pub dither: bool,
+    /// How far behind the terminal is (`screen.rs`): cells may change by
+    /// more before they are sent again.
+    pub calm: u32,
 }
 
 fn buffer(data: Vec<u32>) -> ShaderBuffer {
@@ -546,6 +552,9 @@ impl Layout {
             | Region::Snapshot
             | Region::BgOld
             | Region::BgNew => grid,
+            Region::Shown => cells,
+            // A stroke for every 2 x 1 cells (rounded up), two vec4s each.
+            Region::Strokes => cells.saturating_add(r),
             Region::Particles => SWARM,
             Region::Agents => AGENTS,
             Region::Flame => FLAME_THREADS,
@@ -812,6 +821,7 @@ impl Gpu<'_, '_> {
         put(H::Dt, frame.dt.to_bits());
         put(H::Post, to.act.post.code());
         put(H::Dither, u32::from(frame.dither));
+        put(H::Calm, frame.calm);
         put(H::Swarm, if swarm.is_some() { SWARM } else { 0 });
         put(H::SwarmScene, swarm.map_or(0, |(_, slot)| block(slot)));
         put(H::SimScene, sim.map_or(0, |(_, slot, _)| block(slot)));
@@ -830,8 +840,6 @@ impl Gpu<'_, '_> {
         put(H::InHomes, offsets.homes);
         put(H::Homes, offsets.homes_count);
         put(H::InArt, offsets.art);
-        put(H::InOrbit, offsets.orbit);
-        put(H::OrbitLen, offsets.orbit_len);
         put(
             H::FlameThreads,
             match splat {
@@ -856,10 +864,12 @@ impl Gpu<'_, '_> {
             num::u32_of(from.texels_len())
         };
         let age = |born: f64| num::narrow(frame.now - born);
-        params.extend(from.block(0, age(born_from)));
-        params.extend(to.block(from_len, age(born_to)));
+        let [from_orbit, to_orbit] = offsets.orbits;
+        params.extend(from.block(0, age(born_from), from_orbit));
+        params.extend(to.block(from_len, age(born_to), to_orbit));
 
         let image = num::u32_of(cells.saturating_mul(32));
+        let cols_u32 = u32::from(cols);
         let cell_count = num::u32_of(cells);
         let mut passes = Vec::new();
         if particles > 0 || swarm.is_some() {
@@ -914,6 +924,12 @@ impl Gpu<'_, '_> {
                 ]);
             }
         }
+        if to.act.post == Post::Paint {
+            passes.push((
+                pass("strokes"),
+                cell_count.div_ceil(2).saturating_add(cols_u32),
+            ));
+        }
         passes.extend([
             (pass("post"), image),
             (pass("encode"), cell_count),
@@ -923,6 +939,11 @@ impl Gpu<'_, '_> {
         self.job.passes = passes;
         self.job.state = layout.total;
         None
+    }
+
+    /// A frame that isn't drawn: the GPU does nothing.
+    pub fn idle(&mut self) {
+        self.job.passes.clear();
     }
 
     /// Rebuilds the inputs buffer when the art, particles or swarm change.
@@ -941,7 +962,7 @@ impl Gpu<'_, '_> {
             self.tracker.homes = (stage.id, homes);
         }
         if self.tracker.orbit.is_empty() {
-            self.tracker.orbit = backdrop::reference_orbit();
+            self.tracker.orbit = zoom::endless();
         }
         if self.tracker.noise.is_empty() {
             self.tracker.noise = noise::mask();
@@ -967,8 +988,29 @@ impl Gpu<'_, '_> {
         data.extend(self.tracker.noise.iter().map(|v| v.to_bits()));
         let kernel = num::u32_of(data.len());
         data.extend(lenia_kernel().into_iter().map(f32::to_bits));
-        let orbit = num::u32_of(data.len());
+        let endless = (
+            num::u32_of(data.len()),
+            num::u32_of(self.tracker.orbit.len() / 2),
+        );
         data.extend_from_slice(&self.tracker.orbit);
+        // An aimed zoom brings its own.
+        let mut orbit_of = |stage: &Stage| match &stage.zoom {
+            Some(aim) => {
+                let at = (num::u32_of(data.len()), num::u32_of(aim.orbit.len() / 2));
+                data.extend_from_slice(&aim.orbit);
+                at
+            }
+            None => endless,
+        };
+        let from_orbit = orbit_of(from);
+        let orbits = [
+            from_orbit,
+            if from.id == to.id {
+                from_orbit
+            } else {
+                orbit_of(to)
+            },
+        ];
         let art = num::u32_of(data.len());
         data.extend(from.texels());
         if from.id != to.id {
@@ -985,11 +1027,9 @@ impl Gpu<'_, '_> {
         } else {
             0
         };
-        let orbit_len = num::u32_of(self.tracker.orbit.len() / 2);
         self.tracker.offsets = Inputs {
             ascii,
-            orbit,
-            orbit_len,
+            orbits,
             art,
             points,
             homes,

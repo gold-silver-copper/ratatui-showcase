@@ -32,9 +32,21 @@ fn shade_ink(s: u32, u: f32, v: f32, t: f32, row: u32) -> vec3<f32> {
     switch params[s + S_SHADER] {
         case SH_FLOW: { return sample(s, 0.6 * u + 0.4 * v - 0.08 * t); }
         case SH_PLASMA: {
-            let w = sin(u * 7.0 + t * 0.9) + sin(v * 9.0 - t * 1.1) + sin((u + v) * 5.0 + t * 0.6)
-                + sin(d * 12.0 - t * 1.4);
-            return sample(s, w * 0.125 + 0.5 + t * 0.02);
+            // Plasma: interfering waves in a space that itself flows (domain
+            // warping by drifting noise), so the bands curl, pinch and
+            // split like hot gas. The palette runs across the bands, dark in
+            // the troughs and bright on the crests, and the bands' edges
+            // burn as thin white filaments.
+            let p = vec2(u * 2.4, v * 1.5);
+            let drift = vec2(fbm(p * 1.4 + vec2(t * 0.13, -t * 0.08)), fbm(p * 1.4 + vec2(5.2 - t * 0.1, 1.3 + t * 0.06)));
+            let q = p + (drift - 0.5) * 2.6;
+            let w = sin(q.x * 5.0 + t * 0.9) + sin(q.y * 6.0 - t * 1.15) + sin((q.x - q.y) * 3.5 + t * 0.6)
+                + sin(length(q - vec2(1.2 + 0.4 * sin(t * 0.3), 0.75)) * 8.0 - t * 1.7);
+            let n = w * 0.25;
+            let band = sample(s, n * 0.55 + drift.x * 0.8 + t * 0.025);
+            let lift = 0.4 + 0.6 * smoothstep(-0.9, 0.7, n);
+            let filament = 1.0 - smoothstep(0.0, 0.16, abs(fract(w * 0.7 + t * 0.15) - 0.5));
+            return lerp(band * lift, WHITE, filament * 0.55 + smoothstep(0.75, 1.0, n) * 0.3);
         }
         case SH_PULSE: { return sample(s, d * 1.6 - t * 0.15); }
         case SH_SHEEN: { return lerp(sample(s, u * 0.5 + t * 0.03), WHITE, sweep(u + v * 0.6, t) * 0.8); }
@@ -82,12 +94,19 @@ fn shade_ink(s: u32, u: f32, v: f32, t: f32, row: u32) -> vec3<f32> {
             return mixl(sample(s, warp * 0.2 + t * 0.02), WHITE * 0.95, pow(1.0 - vein, 6.0) * 0.8);
         }
         case SH_LAVA: {
-            // Lava: domain-warped flow, glowing cracks.
-            let q = vec2(u * 2.5, v * 1.2);
-            let a = fbm(q + vec2(0.0, t * 0.12));
-            let b = fbm(q + vec2(a * 2.0, t * 0.08 + 3.0));
-            let hot = smoothstep(0.35, 0.75, b);
-            return mixl(background(s) * 2.0 + vec3(0.12, 0.02, 0.0), mixl(hex(0xff5a00u), sample(s, b + t * 0.03), 0.4) * (0.6 + hot), hot);
+            // Lava: a dark crust broken into plates that drift on the melt
+            // (domain-warped noise), the melt glowing through the cracks
+            // between them and welling up in pools, white-hot where it is
+            // hottest.
+            let q = vec2(u * 3.0, v * 1.6);
+            let a = fbm(q + vec2(0.0, t * 0.1));
+            let b = fbm(q * 1.3 + vec2(a * 2.2, t * 0.07 + 3.0));
+            let crack = 1.0 - smoothstep(0.0, 0.11, abs(b - 0.5));
+            let pool = smoothstep(0.58, 0.74, b);
+            let heat = clamp(max(crack, pool) * (0.75 + 0.25 * sin(t * 1.3 + a * 9.0)), 0.0, 1.0);
+            let crust = mixl(hex(0x5a2410u), sample(s, a * 0.6 + 0.1) * 0.7, 0.4) * (0.75 + 0.5 * a);
+            let melt = mixl(mixl(hex(0xc81e00u), hex(0xff8a10u), heat), hex(0xffe9a0u), smoothstep(0.75, 1.0, heat));
+            return mixl(crust, mixl(melt, sample(s, 0.5 + heat * 0.3), 0.2), heat);
         }
         case SH_GOLD: {
             // Gold leaf: metallic gradient with moving highlights.

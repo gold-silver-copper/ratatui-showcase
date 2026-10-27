@@ -117,11 +117,11 @@ fn structure(p: vec2<f32>) -> vec3<f32> {
     return vec3(cos(angle), sin(angle), spread / max(t.x + t.y, 1e-5));
 }
 
-/// Oil paint: an anisotropic Kuwahara filter (Kyprianidis, Kang and Dollner,
-/// 2009). Around each point, an ellipse stretched along the edges is cut
-/// into four sectors; the sectors that vary least carry most weight, so
-/// strokes flatten colour along edges and never across them.
-fn paint(p: vec2<f32>) -> vec3<f32> {
+/// The underpainting: an anisotropic Kuwahara filter (Kyprianidis, Kang
+/// and Dollner, 2009). Around each point, an ellipse stretched along the
+/// edges is cut into four sectors; the sectors that vary least carry most
+/// weight, so colour flattens along edges and never across them.
+fn kuwahara(p: vec2<f32>) -> vec3<f32> {
     let st = structure(p);
     let across = st.xy;
     let along = vec2(-across.y, across.x);
@@ -147,6 +147,104 @@ fn paint(p: vec2<f32>) -> vec3<f32> {
         weights += w;
     }
     return total / max(weights, 1e-9);
+}
+
+// ---------------------------------------------------------------- brush strokes
+//
+// Oil paint, after Hertzmann's painterly rendering (1998) and Litwinowicz's
+// strokes (1997): a brush stroke for every 8 x 8 samples, laid in a random
+// order, each along the picture's edges where it has them (the structure
+// tensor's direction of least change) and along a slow swirl where it is
+// flat, shorter where the edges are strong so the art keeps its shape, and
+// loaded with the paint under it. Each stroke is a ridge of paint with
+// bristle grooves, lit from the top left, over the Kuwahara underpainting.
+
+const STROKE: f32 = 8.0;
+fn strokes_w() -> u32 { return (img_w() + 7u) / 8u; }
+fn strokes_h() -> u32 { return (img_h() + 7u) / 8u; }
+
+/// The picture's structure around `p`, `spacing` samples apart: the
+/// direction it changes fastest (x, y), how strongly one direction
+/// dominates (z) and how much it changes (w).
+fn tensor(p: vec2<f32>, spacing: f32) -> vec4<f32> {
+    var t = vec3(0.0);
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let q = p + vec2(f32(dx), f32(dy)) * spacing;
+            let e = spacing * 0.5;
+            let g = vec2(scene_luma(q + vec2(e, 0.0)) - scene_luma(q - vec2(e, 0.0)),
+                scene_luma(q + vec2(0.0, e)) - scene_luma(q - vec2(0.0, e)));
+            t += vec3(g.x * g.x, g.y * g.y, g.x * g.y);
+        }
+    }
+    let angle = 0.5 * atan2(2.0 * t.z, t.x - t.y);
+    let spread = sqrt(max((t.x - t.y) * (t.x - t.y) + 4.0 * t.z * t.z, 0.0));
+    return vec4(cos(angle), sin(angle), spread / max(t.x + t.y, 1e-5), sqrt((t.x + t.y) / 9.0));
+}
+
+/// Lays stroke `i`: its centre, direction and half length, then its paint
+/// and seed.
+@compute @workgroup_size(64)
+fn strokes(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let i = thread(id, groups);
+    if i >= strokes_w() * strokes_h() { return; }
+    let gx = i % strokes_w();
+    let gy = i / strokes_w();
+    let seed = hash(gx * 7u + 3u, gy * 13u + 5u);
+    let c = (vec2(f32(gx), f32(gy)) + 0.15 + 0.7 * vec2(hash(gx, gy * 3u + 1u), hash(gx * 5u + 2u, gy))) * STROKE;
+    let st = tensor(c, 3.0);
+    // Along the edges; where there are none, along a slow swirl.
+    let swirl = fbm(c * 0.006 + vec2(time() * 0.02, 0.0)) * TAU * 2.0;
+    let edge = smoothstep(0.02, 0.12, st.w) * st.z;
+    let along = normalize(mix(vec2(cos(swirl), sin(swirl)), vec2(-st.y, st.x), clamp(edge * 1.5, 0.0, 1.0)) + vec2(1e-4, 0.0));
+    // Strong edges get short strokes, flat colour long ones.
+    let half_len = mix(10.0 + 5.0 * seed, 4.5 + 2.0 * seed, smoothstep(0.05, 0.25, st.w));
+    // The paint it carries: the picture along its middle.
+    var paint = vec3(0.0);
+    for (var k = -2; k <= 2; k++) {
+        paint += img_load(H_SCENE, c + along * f32(k) * half_len * 0.4).rgb;
+    }
+    let base = params[H_STROKES] + i * 2u;
+    state[base] = vec4(c, atan2(along.y, along.x), half_len);
+    state[base + 1u] = vec4(paint / 5.0, seed);
+}
+
+/// Oil paint at `p`: the topmost stroke covering it, else the underpainting.
+fn paint(p: vec2<f32>) -> vec3<f32> {
+    let g = vec2<i32>(floor(p / STROKE));
+    var top = -1.0;
+    var colour = vec3(0.0);
+    var lit = 1.0;
+    for (var dy = -2; dy <= 2; dy++) {
+        for (var dx = -2; dx <= 2; dx++) {
+            let sx = g.x + dx;
+            let sy = g.y + dy;
+            if sx < 0 || sy < 0 || sx >= i32(strokes_w()) || sy >= i32(strokes_h()) { continue; }
+            let base = params[H_STROKES] + u32(sy) * strokes_w() * 2u + u32(sx) * 2u;
+            let a = state[base];
+            let b = state[base + 1u];
+            // Later strokes lie on top: the seed is the order they were laid in.
+            if b.w <= top { continue; }
+            let along = vec2(cos(a.z), sin(a.z));
+            let d = p - a.xy;
+            let u = dot(d, along) / a.w;
+            let half_width = 3.2 + 1.8 * fract(b.w * 7.0);
+            let v = dot(d, vec2(-along.y, along.x)) / half_width;
+            // A brush tip: round at the start, tapering off at the end.
+            let taper = select(sqrt(max(1.0 - u * u, 0.0)), 1.0 - u * u * 0.6, u < 0.0);
+            if abs(u) > 1.0 || abs(v) > taper { continue; }
+            top = b.w;
+            let across = v / max(taper, 0.05);
+            // The ridge: lit on the side facing the light, shadowed on the
+            // other, and grooves the bristles left along it.
+            let facing = dot(vec2(-along.y, along.x), normalize(vec2(-1.0, -1.2)));
+            let grooves = sin(across * 5.0 + b.w * 40.0) * 0.05;
+            lit = (1.0 + across * facing * 0.22 + grooves) * (0.84 + 0.16 * sqrt(max(1.0 - across * across, 0.0)));
+            colour = b.rgb * (0.94 + 0.12 * fract(b.w * 13.0));
+        }
+    }
+    if top < 0.0 { return kuwahara(p) * 0.9; }
+    return colour * lit;
 }
 
 /// The flow at `p` for silk: the fluid's own velocity when one runs, else

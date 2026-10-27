@@ -11,7 +11,8 @@ cargo run --release
 cargo run --release -- --hold 10 --glyphs sextants
 cargo run --release -- --seed 1234 # the scenes of seed 1234 again
 cargo run --release -- --watch     # edit src/shaders and watch it change
-cargo run --release -- --profile   # GPU time per phase in the caption
+cargo run --release -- --profile   # GPU and terminal cost in the caption
+cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 ```
 
 | Key | Action |
@@ -36,6 +37,7 @@ cargo run --release -- --profile   # GPU time per phase in the caption
 | `--glyphs blocks\|sextants\|full` | Block characters your terminal draws well. `full` (the default) adds octants and diagonal wedges, which foot, kitty, ghostty and wezterm draw themselves; use `sextants` or `blocks` elsewhere. |
 | `--watch` | Reload the shaders in `src/shaders` whenever they change; an edit that doesn't compile, or whose pipelines fail to build, leaves the running shader in place and shows the error in the caption. |
 | `--profile` | Show the GPU time of each phase in the caption (timestamp queries). |
+| `--pin LAYER=CHOICE` | Keep a layer in every scene, whatever the director would pick: `theme`, `shader`, `backdrop`, `look`, `style`, `mode`, `post` or `motion`, such as `post=paint`, `shader=plasma`, `backdrop=mandelbrot` or `theme=ember`. Repeatable. |
 | `--dither` | Dither colours with blue noise moving on by the golden ratio each frame, for smoother gradients; cells then change every frame, so the terminal works harder. |
 
 ## What it shows
@@ -49,7 +51,7 @@ cargo run --release -- --profile   # GPU time per phase in the caption
   soft shadows, ambient occlusion and depth of field; dye in a swirling fluid;
   coral, mitosis, worms, mazes or spots grown by reaction-diffusion; the Game
   of Life; burning letters with rising smoke; a swarm
-  of particles that hold the shape; slime mold whose trail network draws the
+  of particles that hold the shape; slime mold whose network of veins grows inside the
   letters; a flock of boids that gathers into them; letters crumbling into
   falling sand; crystals branching until they fill the letters; ink rising
   from them and curling through water; or Lenia, continuous life whose
@@ -58,7 +60,7 @@ cargo run --release -- --profile   # GPU time per phase in the caption
   shadow, extruded 3D lettering, or reflected.
 - **Backgrounds:** a vignette, twinkling stars, a synthwave grid, aurora
   curtains, sun rays, Julia sets walking the Mandelbrot set's boundary, an
-  endless deep Mandelbrot zoom, the Burning
+  deep Mandelbrot zoom that dives to a copy of the art, the Burning
   Ship, Newton's fractal, a kaleidoscope, a tunnel, warp-speed stars,
   ray-marched Mandelbulb and Menger sponge fractals, a flight over ray-marched
   hills, metaballs, stained glass, marbled paper, the Apollonian gasket, a
@@ -79,7 +81,7 @@ cargo run --release -- --profile   # GPU time per phase in the caption
   fire, stripes, marble, lava, gold and glitter.
 - **Post-processing:** bloom at three sizes, motion trails, a zoom echo, chromatic aberration,
   a curved CRT with phosphor glow, film grain, shafts of light streaming
-  out from the art, oil paint (an anisotropic Kuwahara filter), silk (line
+  out from the art, oil paint (brush strokes along the picture's edges, lit as ridges of paint, over an anisotropic Kuwahara underpainting), silk (line
   integral convolution along the fluid or the picture's edges), or the
   Droste effect spiralling the picture into itself.
 - **Motion while holding:** still, floating, waving, breathing, swaying,
@@ -158,6 +160,14 @@ window. Each frame is a chain of compute passes (`src/shaders`):
 4. **Backgrounds** at a quarter of the samples, sampled smoothly: fractals and
    ray-marching cost a quarter as much. The Mandelbrot zoom follows a reference
    orbit computed in double precision on the CPU, so it can go to 1e-8 in f32.
+   Two zooms in three are aimed: while the scene before holds, the CPU
+   searches (within 400 ms and 400 tries) for a spot where the orbit trap
+   shaped like the art draws a clear, upright copy of it at the end of the
+   dive, by solving with Newton's method for a point whose orbit lands on
+   the art's centre at the right step, and checks it with a small render
+   done the way the GPU does it (`src/zoom.rs`). If nothing turns up, the
+   scene keeps the endless zoom into seahorse valley. The set is lit by its
+   distance estimate, so its filaments glow at any depth.
 5. **Simulations**: the fluid (advection, vorticity confinement, a pressure
    solve), reaction-diffusion, Life and fire, stepped 60 times a second
    whatever the frame rate; their state stays on the GPU between frames. When
@@ -180,6 +190,16 @@ again, and each frame goes out as one synchronized update. A GPU with Vulkan,
 Metal or DirectX 12 drivers is needed; a terminal too large for its buffers
 gets a message instead of a frame. Most of the CPU time goes to printing the
 frame; at 160x48 that is about a fifth of one core.
+
+Where two glyphs fit a cell almost equally well, the cell keeps the one it
+shows unless the new one fits clearly better (hysteresis), so noise doesn't
+make it flicker. The changed cells go out with the shortest escape codes
+(a space's foreground and a full block's background are never sent) in one
+write. A terminal that can't keep up makes that write block: the screen
+then lets colours drift further before resending a cell and draws at a
+steady lower rate, and comes back once writes are quick again. With
+`--profile` the caption shows frames per second, bytes, cells changed and
+changed back per frame, and the write time.
 
 The layout of the parameters the shaders read, and every option's number,
 come from the Rust side (`src/params.rs`, `src/shader.rs`), so the two can't

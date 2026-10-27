@@ -13,11 +13,13 @@ mod noise;
 mod num;
 mod params;
 mod profile;
+mod screen;
 mod shader;
 mod stage;
 mod tempo;
 mod theme;
 mod transition;
+mod zoom;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -33,11 +35,11 @@ use bevy::window::ExitCondition;
 use bevy_ratatui::event::{KeyMessage, ResizeMessage};
 use bevy_ratatui::{RatatuiContext, RatatuiPlugins};
 use ratatui::crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::crossterm::terminal::{self, BeginSynchronizedUpdate, EndSynchronizedUpdate};
+use ratatui::crossterm::terminal;
 use tachyonfx::EffectManager;
 
-use crate::backdrop::BACKDROPS;
-use crate::director::Director;
+use crate::backdrop::{BACKDROPS, Backdrop};
+use crate::director::{Director, Pin};
 use crate::fonts::SystemFonts;
 use crate::glyphs::{GlyphSet, Glyphs};
 use crate::stage::{Act, IDLES, Idle, Look, Mode, Post, Stage};
@@ -47,7 +49,8 @@ use crate::transition::{Crossing, KINDS};
 
 const USAGE: &str = "\
 usage: ratatui-showcase [--hold SECONDS] [--bpm N] [--seed N] [--fps N]
-                        [--glyphs blocks|sextants|full] [--watch] [--profile] [--dither]
+                        [--glyphs blocks|sextants|full] [--pin LAYER=CHOICE]...
+                        [--watch] [--profile] [--dither]
 
   --hold       how long each scene stays on screen, 0.5 to 86400, rounded to
                whole bars (default 7: 4 bars at 120 bpm)
@@ -58,6 +61,8 @@ usage: ratatui-showcase [--hold SECONDS] [--bpm N] [--seed N] [--fps N]
   --fps        frames per second, 1 to 1000 (default 60)
   --glyphs     block characters the terminal draws well (default full: octants
                and wedges, as in foot, kitty, ghostty and wezterm)
+  --pin        keep a layer in every scene, such as post=paint, mode=slime,
+               shader=plasma, backdrop=mandelbrot, look=ascii or theme=ember
   --watch      reload src/shaders when they change, to tune effects live
   --profile    show how long each phase takes on the GPU in the caption
   --dither     smooth colours by dithering over time (every cell changes every
@@ -72,6 +77,7 @@ struct Config {
     watch: bool,
     profile: bool,
     dither: bool,
+    pins: Vec<Pin>,
 }
 
 fn config() -> std::result::Result<Config, String> {
@@ -84,6 +90,7 @@ fn config() -> std::result::Result<Config, String> {
         watch: false,
         profile: false,
         dither: false,
+        pins: Vec::new(),
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -108,6 +115,7 @@ fn config() -> std::result::Result<Config, String> {
                     f64::from(within(&value()?, 1.0, 1000.0).ok_or("--fps takes 1 to 1000")?)
             }
             "--glyphs" => config.glyphs = GlyphSet::parse(&value()?).ok_or("unknown glyph set")?,
+            "--pin" => config.pins.push(Pin::parse(&value()?)?),
             "--profile" => config.profile = true,
             "--watch" => config.watch = true,
             "--dither" => config.dither = true,
@@ -164,10 +172,12 @@ fn main() -> ExitCode {
         .insert_resource(SystemFonts::load())
         .insert_resource(Glyph(Glyphs::new(config.glyphs)))
         .insert_resource(Dither(config.dither))
+        .insert_resource(screen::Screen::new(config.fps))
         .insert_resource(Show::new(
             f64::from(config.hold),
             Tempo::new(f64::from(config.bpm)),
             config.seed.unwrap_or_else(|| fastrand::u64(..1_000_000)),
+            config.pins,
         ))
         .init_resource::<Effects>()
         .add_systems(PreUpdate, input)
@@ -232,14 +242,15 @@ struct Show {
 }
 
 impl Show {
-    fn new(hold: f64, tempo: Tempo, seed: u64) -> Self {
+    fn new(hold: f64, tempo: Tempo, seed: u64, pins: Vec<Pin>) -> Self {
+        let director = Director::new(seed, pins);
         Self {
-            act: Act {
+            act: director.pinned(Act {
                 shader: Shader::Sheen,
                 idle: Idle::Float,
                 post: Post::Bloom,
                 ..Act::plain()
-            },
+            }),
             stage: None,
             pending: None,
             crossing: None,
@@ -252,7 +263,7 @@ impl Show {
             caption: true,
             skip: false,
             next: None,
-            director: Director::new(seed),
+            director,
             epoch: 0.0,
         }
     }
@@ -275,9 +286,24 @@ impl Show {
     fn prepare(&mut self, current: &Act, fonts: &SystemFonts, cols: u16, rows: u16) {
         let act = self.director.next(current, fonts);
         let ratio = cell_ratio();
-        let task =
-            AsyncComputeTaskPool::get().spawn(async move { Stage::new(act, cols, rows, ratio) });
+        let aim = self.aim(&act);
+        let task = AsyncComputeTaskPool::get().spawn(async move {
+            let mut stage = Stage::new(act, cols, rows, ratio);
+            if let Some((dive, seed)) = aim {
+                stage.aim(dive, seed);
+            }
+            stage
+        });
         self.next = Some((cols, rows, task));
+    }
+
+    /// For a Mandelbrot zoom that should dive somewhere (two in three; the
+    /// rest keep the endless zoom): how long the dive takes, three quarters
+    /// of the hold, and the seed for the search.
+    fn aim(&mut self, act: &Act) -> Option<(f32, u64)> {
+        let seed = self.director.rng().u64(..);
+        (act.backdrop == Backdrop::Mandelbrot && !seed.is_multiple_of(3))
+            .then(|| (num::narrow(self.hold * 0.75), seed))
     }
 
     /// The prepared next scene if it fits `cols` x `rows`, else a new one.
@@ -370,7 +396,9 @@ fn input(
 }
 
 fn frame(
-    mut context: ResMut<RatatuiContext>,
+    // The context set the terminal up; frames go out through the screen.
+    _context: Res<RatatuiContext>,
+    (mut screen, mut last): (ResMut<screen::Screen>, Local<Frames>),
     mut show: ResMut<Show>,
     mut effects: ResMut<Effects>,
     (glyphs, fonts, time): (Res<Glyph>, Res<SystemFonts>, Res<Time>),
@@ -379,11 +407,22 @@ fn frame(
 ) -> Result {
     let show = &mut *show;
     let effects = effects.0.get_mut().unwrap_or_else(PoisonError::into_inner);
-    let (now, dt) = (time.elapsed_secs_f64(), time.delta());
-    // Frames go out whole: the terminal shows none of it until the end.
-    ratatui::crossterm::queue!(context.backend_mut(), BeginSynchronizedUpdate)?;
-    context.draw(|frame| {
-        let area = frame.area();
+    let now = time.elapsed_secs_f64();
+    // While the terminal falls behind, some frames aren't drawn at all.
+    let Some(dt) = screen.due(time.delta()) else {
+        gpu.idle();
+        return Ok(());
+    };
+    let (cols, rows) = terminal::size()?;
+    let area = ratatui::layout::Rect::new(0, 0, cols, rows);
+    let (changed, flips) = if gpu_frame.profile.is_some() {
+        flicker(&gpu_frame.data, &mut last)
+    } else {
+        (0, 0)
+    };
+    let wire = gpu_frame.profile.as_ref().map(|_| screen.summary());
+    let calm = screen.pressure();
+    screen.frame(area, changed, flips, |buffer| {
         if show
             .stage
             .as_ref()
@@ -406,7 +445,11 @@ fn frame(
             effects.accent.cancel_unique_effect(());
             show.crossing = None;
             show.hold_from(now);
-            let stage = Stage::new(show.act.clone(), area.width, area.height, cell_ratio());
+            let mut stage = Stage::new(show.act.clone(), area.width, area.height, cell_ratio());
+            // Nothing shows yet: the first scene can wait for its search.
+            if first && let Some((dive, seed)) = show.aim(&stage.act) {
+                stage.aim(dive, seed);
+            }
             if first {
                 effects
                     .transition
@@ -471,20 +514,17 @@ fn frame(
             now,
             dt: dt.as_secs_f32(),
             dither: dither.0,
+            calm,
         };
         if let Some(reason) = gpu.render(&glyphs.0, stage, show.crossing.as_ref(), frame_info) {
-            notice(frame.buffer_mut(), &reason);
+            notice(buffer, &reason);
             return;
         }
         if let Some(cells) = gpu_frame.cells(area.width, area.height) {
-            gpu::draw(cells, frame.buffer_mut());
+            gpu::draw(cells, buffer);
         }
-        effects
-            .transition
-            .process_effects(dt.into(), frame.buffer_mut(), area);
-        effects
-            .accent
-            .process_effects(dt.into(), frame.buffer_mut(), area);
+        effects.transition.process_effects(dt.into(), buffer, area);
+        effects.accent.process_effects(dt.into(), buffer, area);
 
         if show.caption {
             let act = &stage.act;
@@ -503,7 +543,7 @@ fn frame(
                 act.idle.name()
             );
             if let Some(profile) = &gpu_frame.profile {
-                caption = format!("{profile}  ·  {caption}");
+                caption = format!("{}  ·  {profile}  ·  {caption}", wire.unwrap_or_default());
             }
             if let Some(error) = &gpu_frame.shader_error {
                 caption = format!(
@@ -514,11 +554,31 @@ fn frame(
             if let Some(crossing) = &show.crossing {
                 caption += &format!("  ·  ↦ {}", crossing.kind.name());
             }
-            caption_line(frame.buffer_mut(), &caption, act);
+            caption_line(buffer, &caption, act);
         }
     })?;
-    ratatui::crossterm::execute!(context.backend_mut(), EndSynchronizedUpdate)?;
     Ok(())
+}
+
+/// The GPU's last two frames of cells, for counting what changed.
+type Frames = (Vec<u32>, Vec<u32>);
+
+/// Cells the GPU changed since the last frame, and those of them that went
+/// back to what they showed the frame before (flicker), for `--profile`.
+fn flicker(data: &[u32], (last, before): &mut Frames) -> (usize, usize) {
+    let cells = |d: &[u32]| d.as_chunks::<3>().0.to_vec();
+    let (now, old, older) = (cells(data), cells(last), cells(before));
+    let changed = now.iter().zip(&old).filter(|(a, b)| a != b).count();
+    let flips = now
+        .iter()
+        .zip(&old)
+        .zip(&older)
+        .filter(|((a, b), c)| a != b && a == c)
+        .count();
+    std::mem::swap(last, before);
+    last.clear();
+    last.extend_from_slice(data);
+    (changed, flips)
 }
 
 /// `text` wrapped and centred on an otherwise blank screen.
