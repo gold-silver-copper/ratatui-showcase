@@ -3,6 +3,12 @@
 // colour (2-means); the split's shape picks the glyph. Every byte written
 // to the terminal costs time, so a cell that barely changed keeps what it
 // had, and a cell of one colour is a space with only a background.
+//
+// Hysteresis: where two glyphs, or a glyph and plain colour, fit a cell
+// almost equally well, noise would flip it between them frame to frame. A
+// cell keeps the glyph it shows (Region::Shown) unless the new one is
+// clearly better; an edge that moves is much better at once, so motion
+// stays sharp.
 
 /// How much of the 3 x 3 samples around sample `i` of a cell `mask` covers,
 /// staying inside the cell.
@@ -76,6 +82,33 @@ fn best_glyph(base: u32, count: u32, mask: u32, soft: ptr<function, array<f32, 3
         if err < least { least = err; best = picks[k]; }
     }
     return best;
+}
+
+/// How much worse than the new choice the shown glyph may fit before the
+/// cell changes: a share, and a floor for nearly flat cells.
+const KEEP: f32 = 0.2;
+const KEEP_FLOOR: f32 = 0.004;
+
+/// How badly a glyph of shape `mask` draws the samples `c`: each side
+/// painted with the average of the samples it covers, the squared error
+/// left, summed.
+fn misfit(mask: u32, c: ptr<function, array<vec3<f32>, 32>>) -> f32 {
+    var on = vec3(0.0);
+    var off = vec3(0.0);
+    var a = 0.0;
+    var b = 0.0;
+    for (var i = 0u; i < SAMPLES; i++) {
+        let v = (*c)[i];
+        if ((mask >> i) & 1u) == 1u { on += v; a += 1.0; } else { off += v; b += 1.0; }
+    }
+    on = select(vec3(0.0), on / a, a > 0.0);
+    off = select(vec3(0.0), off / b, b > 0.0);
+    var err = 0.0;
+    for (var i = 0u; i < SAMPLES; i++) {
+        let d = (*c)[i] - select(off, on, ((mask >> i) & 1u) == 1u);
+        err += dot(d, d);
+    }
+    return err;
 }
 
 /// Average colour in linear light.
@@ -157,9 +190,18 @@ fn encode(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups)
         spread += dot(c[i] - centre, c[i] - centre);
     }
     spread /= 32.0;
-    let plain = contrast < 0.05 || contrast * contrast < spread * 6.0 || n_on == 0.0 || n_off == 0.0;
+    // What the cell showed last frame, if in this look: a plain cell needs
+    // a little more to become a glyph, and a glyph a little less to stay.
+    let shown = state[params[H_SHOWN] + cell];
+    let held = bitcast<u32>(shown.z) == params[H_LOOK] + 1u;
+    let was_plain = held && bitcast<u32>(shown.x) == 0u;
+    let was_shaped = held && bitcast<u32>(shown.x) != 0u;
+    let edge = select(select(1.0, 1.25, was_plain), 0.8, was_shaped);
+    let plain = contrast < 0.05 * edge || contrast * contrast < spread * 6.0 * edge || n_on == 0.0 || n_off == 0.0;
 
     var glyph = 0x2580u;
+    // The shape of the block glyph the cell shows, or 0 for plain colour.
+    var shape = 0u;
     var fg = pixels_top;
     var bg = pixels_bottom;
     let look = params[H_LOOK];
@@ -176,9 +218,16 @@ fn encode(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups)
                     soft[i] = clamp(dot(c[i] - bg_group, span) / max(dot(span, span), 1e-6), 0.0, 1.0);
                 }
                 best = best_glyph(table, count, mask, &soft);
+                // Keep the shown glyph unless the new one is clearly better.
+                let before = vec2(bitcast<u32>(shown.x), bitcast<u32>(shown.y));
+                if was_shaped && before.x != best.x && before.x != 0xffffffffu {
+                    let now = misfit(best.x, &c);
+                    if misfit(before.x, &c) <= now * (1.0 + KEEP) + KEEP_FLOOR { best = before; }
+                }
             }
             let shaped = best.x != 0u && best.x != 0xffffffffu;
             if shaped {
+                shape = best.x;
                 glyph = best.y;
                 // Each side of the glyph: the average of the samples it covers.
                 var on = vec3(0.0);
@@ -289,18 +338,23 @@ fn encode(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups)
     if glyph == 0x2580u && front == back { glyph = 0x20u; }
     if glyph == 0x20u { front = 0u; }
     let o = 2u + cell * 3u;
-    if params[H_DITHER] == 0u && output[o] == glyph && near(output[o + 1u], front) && near(output[o + 2u], back) {
+    // While the terminal falls behind (H_CALM), colours may drift further
+    // before the cell is sent again.
+    let slack = 2 + 3 * i32(params[H_CALM]);
+    if params[H_DITHER] == 0u && output[o] == glyph && near(output[o + 1u], front, slack) && near(output[o + 2u], back, slack) {
         return;
     }
     output[o] = glyph;
     output[o + 1u] = front;
     output[o + 2u] = back;
+    state[params[H_SHOWN] + cell] = vec4(bitcast<f32>(shape), bitcast<f32>(glyph), bitcast<f32>(look + 1u), 0.0);
 }
 
-/// Whether two packed colours differ by at most one step in each channel.
-fn near(a: u32, b: u32) -> bool {
+/// Whether two packed colours differ by at most `slack` steps in each
+/// channel.
+fn near(a: u32, b: u32, slack: i32) -> bool {
     let d = abs(vec3<i32>(unpack4x8unorm(a).xyz * 255.0) - vec3<i32>(unpack4x8unorm(b).xyz * 255.0));
-    return all(d <= vec3(2));
+    return all(d <= vec3(slack));
 }
 
 /// The frame's last pass: records what this frame did for the next (see

@@ -542,6 +542,103 @@ const PRESETS: &[Preset] = &[
     ),
 ];
 
+/// A layer the visitor fixed (`--pin`): every scene keeps it, whatever the
+/// budget says.
+#[derive(Clone)]
+pub enum Pin {
+    Palette(Palette),
+    Shader(Shader),
+    Backdrop(Backdrop),
+    Look(Look),
+    Style(Style),
+    Mode(Mode),
+    Post(Post),
+    Idle(Idle),
+}
+
+/// `"Burning ship"` or `"particle-life"` as `"burningship"` and
+/// `"particlelife"`, so names match however they are written.
+fn squash(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The choice of layer `T` called `name`.
+fn named<T: Layer + std::fmt::Debug>(name: &str) -> Option<T> {
+    T::VALUES
+        .iter()
+        .copied()
+        .find(|v| squash(&format!("{v:?}")) == squash(name))
+}
+
+/// Every choice of layer `T`, for an error message.
+fn names<T: Layer + std::fmt::Debug>() -> String {
+    let all: Vec<String> = T::VALUES
+        .iter()
+        .map(|v| squash(&format!("{v:?}")))
+        .collect();
+    all.join(", ")
+}
+
+impl Pin {
+    /// `layer=choice`, such as `post=paint` or `theme=ember`.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let (layer, value) = text
+            .split_once('=')
+            .ok_or_else(|| format!("--pin takes layer=choice, not {text}"))?;
+        let unknown = |all: String| format!("no {layer} called {value}: try {all}");
+        match squash(layer).as_str() {
+            "theme" | "palette" => THEMES
+                .iter()
+                .find(|t| squash(t.name) == squash(value))
+                .map(|t| Pin::Palette(Palette::theme(t)))
+                .ok_or_else(|| {
+                    let all: Vec<String> = THEMES.iter().map(|t| squash(t.name)).collect();
+                    unknown(all.join(", "))
+                }),
+            "shader" => named(value)
+                .map(Pin::Shader)
+                .ok_or_else(|| unknown(names::<Shader>())),
+            "backdrop" | "background" => named(value)
+                .map(Pin::Backdrop)
+                .ok_or_else(|| unknown(names::<Backdrop>())),
+            "look" => named(value)
+                .map(Pin::Look)
+                .ok_or_else(|| unknown(names::<Look>())),
+            "style" => named(value)
+                .map(Pin::Style)
+                .ok_or_else(|| unknown(names::<Style>())),
+            "mode" => named(value)
+                .map(Pin::Mode)
+                .ok_or_else(|| unknown(names::<Mode>())),
+            "post" => named(value)
+                .map(Pin::Post)
+                .ok_or_else(|| unknown(names::<Post>())),
+            "motion" | "idle" => named(value)
+                .map(Pin::Idle)
+                .ok_or_else(|| unknown(names::<Idle>())),
+            _ => Err(format!(
+                "--pin knows theme, shader, backdrop, look, style, mode, post and motion, not {layer}"
+            )),
+        }
+    }
+
+    fn apply(&self, act: &mut Act) {
+        match self {
+            Pin::Palette(p) => act.palette = p.clone(),
+            Pin::Shader(v) => act.shader = *v,
+            Pin::Backdrop(v) => act.backdrop = *v,
+            Pin::Look(v) => act.look = *v,
+            Pin::Style(v) => act.style = *v,
+            Pin::Mode(v) => act.mode = *v,
+            Pin::Post(v) => act.post = *v,
+            Pin::Idle(v) => act.idle = *v,
+        }
+    }
+}
+
 /// Scenes since a choice last played, for one never played.
 const UNSEEN: u64 = 64;
 /// Scenes a choice sits out after it played, when anything else fits.
@@ -560,10 +657,11 @@ pub struct Director {
     step: usize,
     /// The layer the run started around, which its cuts keep.
     theme: Option<Slot>,
+    pins: Vec<Pin>,
 }
 
 impl Director {
-    pub fn new(seed: u64) -> Self {
+    pub fn new(seed: u64, pins: Vec<Pin>) -> Self {
         Self {
             rng: Rng::with_seed(seed),
             seed,
@@ -572,7 +670,20 @@ impl Director {
             pattern: usize::MAX,
             step: 0,
             theme: None,
+            pins,
         }
+    }
+
+    /// `act` with the pinned layers in place, and a motion that suits its
+    /// mode unless the motion is pinned too.
+    pub fn pinned(&self, mut act: Act) -> Act {
+        for pin in &self.pins {
+            pin.apply(&mut act);
+        }
+        if !act.idle.suits(act.mode) && !self.pins.iter().any(|p| matches!(p, Pin::Idle(_))) {
+            act.idle = Idle::Still;
+        }
+        act
     }
 
     pub fn seed(&self) -> u64 {
@@ -600,7 +711,8 @@ impl Director {
                 self.peak(&mut act);
             }
         }
-        if act.backdrop != current.backdrop || act.mode != current.mode {
+        let mut act = self.pinned(act);
+        if act.backdrop != current.backdrop || act.mode != current.mode || !self.pins.is_empty() {
             act.variant = self.rng.u32(..);
         }
         self.scene = self.scene.saturating_add(1);
@@ -942,7 +1054,7 @@ mod tests {
 
     fn run(seed: u64, scenes: usize) -> Vec<Act> {
         let fonts = SystemFonts::empty();
-        let mut director = Director::new(seed);
+        let mut director = Director::new(seed, Vec::new());
         let mut act = Act::plain();
         (0..scenes)
             .map(|_| {

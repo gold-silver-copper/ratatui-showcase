@@ -83,47 +83,76 @@ fn julia(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
     return trapped(s, escape_color(s, select(smooth_escape(i, z), limit, i >= limit), limit, t), select(trap, FAR, i >= limit), t);
 }
 
-fn orbit(n: u32) -> vec2<f32> {
-    let o = params[H_IN_ORBIT] + min(n, max(params[H_ORBIT_LEN], 1u) - 1u) * 2u;
+fn orbit(s: u32, n: u32) -> vec2<f32> {
+    let o = params[s + S_ORBIT] + min(n, max(params[s + S_ORBIT_LEN], 1u) - 1u) * 2u;
     return vec2(bitcast<f32>(inputs[o]), bitcast<f32>(inputs[o + 1u]));
 }
 
-/// An endless zoom into seahorse valley, in and back out every few minutes.
+/// Iterations for a view `depth` e-folds deep: about a thousand at 1e-8.
+fn zoom_limit(depth: f32) -> f32 { return min(200.0 + 60.0 * depth + 4.0 * depth * depth, 3000.0); }
+
+/// The Mandelbrot zoom. Most scenes dive from the whole set to a spot the
+/// CPU searched for (zoom.rs), turning on the way, where the orbit trap
+/// draws an upright copy of the art beside it; the others zoom endlessly
+/// into seahorse valley, in and back out every few minutes.
 /// f32 can't tell neighbouring pixels apart past about 1e-6, so each pixel
 /// only follows its small difference from a reference orbit the CPU
 /// computed in double precision, and starts over from the reference
 /// ("rebases") when the difference would grow larger than the orbit.
 fn mandelbrot(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
-    // Deeper views need more iterations: about a thousand at 1e-8.
-    let depth = 18.0 * (0.5 - 0.5 * cos(t * TAU / 120.0));
+    var depth = 18.0 * (0.5 - 0.5 * cos(t * TAU / 120.0));
+    var turn = 0.0;
+    var span = 0.6;
+    var limit = zoom_limit(depth);
+    let dive = pf(s + S_ZOOM_DIVE);
+    if dive > 0.0 {
+        // Faster and then slower, on a log scale: it lands gently.
+        let e = ease_in_out(age(s) / dive);
+        depth = log(3.0 / pf(s + S_ZOOM_SCALE)) * e;
+        turn = pf(s + S_ZOOM_TURN) * e;
+        span = mix(span, pf(s + S_ZOOM_SPAN), e);
+        limit = mix(zoom_limit(depth), f32(params[s + S_ZOOM_LIMIT]), smoothstep(0.7, 1.0, e));
+    }
     let scale = 3.0 * exp(-depth);
-    let dc = vec2((x - 0.5) * pf(H_ASPECT), y - 0.5) * scale;
-    let limit = min(200.0 + 60.0 * depth + 4.0 * depth * depth, 3000.0);
+    let dc = rot(turn) * vec2((x - 0.5) * pf(H_ASPECT), y - 0.5) * scale;
     var dz = vec2(0.0);
     var m = 0u;
     var i = 0.0;
     var z = vec2(0.0);
     var trap = FAR;
     var checks = 0u;
+    // The derivative by c, for the distance to the set.
+    var der = vec2(0.0);
     for (; i < limit; i += 1.0) {
-        dz = cmul(2.0 * orbit(m) + dz, dz) + dc;
+        der = 2.0 * cmul(z, der) + vec2(1.0, 0.0);
+        dz = cmul(2.0 * orbit(s, m) + dz, dz) + dc;
         m += 1u;
-        z = orbit(m) + dz;
+        z = orbit(s, m) + dz;
         if dot(z, z) > 16.0 { break; }
         // Only once this orbit has left its neighbours': before that every
         // pixel would light alike.
         if checks < 96u && dot(dz, dz) > 1e-4 {
-            trap = min(trap, art_trap(s, z, vec2(0.0, 1.2), 0.6));
+            trap = min(trap, art_trap(s, z, vec2(0.0, 1.2), span));
             checks += 1u;
         }
-        if dot(z, z) < dot(dz, dz) || m + 1u >= params[H_ORBIT_LEN] {
+        if dot(z, z) < dot(dz, dz) || m + 1u >= params[s + S_ORBIT_LEN] {
             dz = z;
             m = 0u;
         }
     }
-    // Inside the set the orbit settles, often on the art: only escaping
-    // orbits draw it.
-    return trapped(s, escape_color(s, select(smooth_escape(i, z), limit, i >= limit), limit, t), select(trap, FAR, i >= limit), t);
+    if i >= limit {
+        // Inside the set the orbit settles, often on the art: only
+        // escaping orbits draw it.
+        return background(s) * 0.6;
+    }
+    // Lit by how close the set is, in pixels: its filaments glow at any
+    // depth, and the smooth regions between them, where the copies of the
+    // art appear, stay dark.
+    let distance = length(z) * log(length(z)) / max(length(der), 1e-30);
+    let edge = exp(-sqrt(max(distance / scale * f32(grid_h()), 0.0)) * 0.7);
+    let mu = smooth_escape(i, z);
+    let c = sample(s, log2(mu + 1.0) * 0.3 + t * 0.03) * (0.07 + 0.93 * edge);
+    return trapped(s, c, trap, t);
 }
 
 fn burning_ship(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
@@ -160,16 +189,51 @@ fn newton(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
     return sample(s, floor(root + 0.5) / 3.0 + t * 0.01) * (0.2 + 0.8 * pow(shade, 1.5));
 }
 
+/// A kaleidoscope: the view folded into eight mirrored wedges, turning,
+/// over drifting coloured glass. The glass is noise cut into bands of the
+/// palette with dark leading between them, so each piece has a crisp
+/// edge for the mirrors to multiply, and the whole reads as one mandala,
+/// brightest in the middle.
 fn kaleidoscope(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
     let p = vec2((x - 0.5) * pf(H_ASPECT), y - 0.5);
     let segments = 8.0;
     let r = length(p);
-    var a = atan2(p.y, p.x) + t * 0.08;
+    var a = atan2(p.y, p.x) + t * 0.05;
     let wedge = TAU / segments;
     a = abs(a - floor(a / wedge) * wedge - wedge * 0.5);
-    let q = vec2(cos(a), sin(a)) * r * 3.0;
-    let n = fbm(q + vec2(t * 0.15, -t * 0.1));
-    return sample(s, n * 1.5 + r * 0.6 - t * 0.04) * (0.25 + 0.75 * smoothstep(0.25, 0.75, n));
+    // Pieces stream outward from the middle.
+    let q = vec2(cos(a), sin(a)) * (r * 3.2 - t * 0.12);
+    let n = fbm(q + vec2(t * 0.03, 1.7)) + 0.35 * fbm(q * 2.1 - vec2(t * 0.05, 0.0));
+    let bands = n * 6.0;
+    let piece = floor(bands);
+    let leading = smoothstep(0.0, 0.12, abs(fract(bands) - 0.5) * 2.0 - 0.75);
+    let glass = sample(s, piece * 0.17 + t * 0.015) * (0.55 + 0.45 * fract(piece * 0.618));
+    let mirror = exp(-abs(a - wedge * 0.5) * r * 140.0) * 0.5;
+    return glass * (1.0 - leading * 0.85) * (1.15 - r * 0.9) + sample(s, 0.5) * mirror;
+}
+
+/// The northern lights: three curtains hanging at different heights, each
+/// folding along slow noise, brightest at its lower hem and fading upward
+/// in fine vertical rays, from the palette's first colours at the hem to
+/// its later ones above, rippling and drifting.
+fn aurora(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
+    let aspect = pf(H_ASPECT);
+    var light = vec3(0.0);
+    for (var k = 0; k < 3; k++) {
+        let fk = f32(k);
+        let u = x * aspect;
+        let fold = fbm(vec2(u * 1.2 + fk * 3.1, t * 0.04 + fk)) - 0.5;
+        let hem = 0.42 + fk * 0.1 + fold * 0.25 + 0.03 * sin(u * 4.0 + t * 0.3 + fk * 2.0);
+        // Above the hem (y smaller), fading over a curtain's height.
+        let above = hem - y;
+        if above < -0.02 { continue; }
+        let height = 0.22 + 0.1 * fk;
+        let curtain = smoothstep(-0.02, 0.01, above) * exp(-max(above, 0.0) / height);
+        let rays = 0.45 + 0.55 * pow(value_noise(vec2(u * 38.0 + fold * 30.0, t * 0.35 + fk * 7.0)), 1.5);
+        let colour = sample(s, 0.15 + fk * 0.18 + max(above, 0.0) * 1.4 + t * 0.01);
+        light += colour * curtain * rays * (0.55 - fk * 0.12);
+    }
+    return light;
 }
 
 fn tunnel(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
@@ -515,22 +579,35 @@ fn fractal3(kind: u32, p0: vec3<f32>, t: f32) -> vec2<f32> {
     return vec2(length(p) * pow(scale, -11.0), trap);
 }
 
-/// The Mandelbox or a kaleidoscopic IFS, slowly orbited.
+/// The Mandelbox or a kaleidoscopic IFS, slowly orbited: the Mandelbox
+/// from close enough to see into its folds. Each surface is lit by its
+/// normal (from the distance's gradient) with a key light and a rim, its
+/// creases darkened by how many steps the ray took, and fogged with depth.
 fn fractal_view(s: u32, x: f32, y: f32, t: f32, kind: u32) -> vec3<f32> {
-    let ray = camera_ray(x, y, t, select(3.0, 9.0, kind == B_MANDELBOX));
+    let ray = camera_ray(x, y, t, select(3.0, 4.6, kind == B_MANDELBOX));
     var d = 0.0;
     var steps = 0.0;
     var trap = 1.0;
     var found = false;
-    for (; steps < 80.0; steps += 1.0) {
+    for (; steps < 90.0; steps += 1.0) {
         let res = fractal3(kind, ray[0] + ray[1] * d, t);
         if res.x < 0.0015 * d { found = true; trap = res.y; break; }
         d += res.x;
         if d > 20.0 { break; }
     }
-    let occlusion = 1.0 - steps / 80.0;
+    let occlusion = 1.0 - steps / 90.0;
     if !found { return background(s) + sample(s, 0.6) * pow(1.0 - occlusion, 4.0) * 0.2; }
-    return sample(s, log(1.0 + trap) * 0.6 + t * 0.02) * (0.12 + 0.88 * pow(occlusion, 1.5));
+    let hit = ray[0] + ray[1] * d;
+    let e = 0.0008 * d + 0.0004;
+    let n = normalize(vec3(
+        fractal3(kind, hit + vec3(e, 0.0, 0.0), t).x - fractal3(kind, hit - vec3(e, 0.0, 0.0), t).x,
+        fractal3(kind, hit + vec3(0.0, e, 0.0), t).x - fractal3(kind, hit - vec3(0.0, e, 0.0), t).x,
+        fractal3(kind, hit + vec3(0.0, 0.0, e), t).x - fractal3(kind, hit - vec3(0.0, 0.0, e), t).x) + vec3(1e-6));
+    let key = max(dot(n, normalize(vec3(0.6, 0.8, -0.4))), 0.0);
+    let rim = pow(1.0 - max(dot(n, -ray[1]), 0.0), 3.0);
+    let colour = sample(s, log(1.0 + trap) * 0.6 + t * 0.02);
+    let lit = colour * (0.1 + 0.75 * key) * pow(occlusion, 1.2) + lerp(colour, WHITE, 0.5) * rim * 0.3;
+    return mixl(lit, background(s), 1.0 - exp(-d * 0.12));
 }
 
 /// Background at `(x, y)` in 0..1, half-cell pixel `(px, py)`.
@@ -558,12 +635,7 @@ fn backdrop(s: u32, x: f32, y: f32, px: u32, py: u32, t: f32) -> vec3<f32> {
             let grid = max(line(z, 0.12), line(lane, 0.08 * min(depth, 10.0) / 4.0));
             return base + sample(s, 0.0) * grid * 0.45 * fade + glow;
         }
-        case B_AURORA: {
-            let wave = sin(x * 3.0 + t * 0.15) * 0.08 + sin(x * 7.0 - t * 0.1) * 0.04;
-            let band = exp(-pow((y - 0.32 - wave) * 6.0, 2.0));
-            let rays = sin(x * 40.0 + sin(x * 5.0 + t * 0.3) * 6.0) * 0.35 + 0.65;
-            return base + sample(s, x * 0.6 + t * 0.02) * band * rays * 0.28;
-        }
+        case B_AURORA: { return base * 0.6 + aurora(s, x, y, t); }
         case B_RAYS: {
             let angle = atan2(dy / max(aspect, 0.1), dx) / TAU;
             let beam = abs(wrap(angle * 14.0 + t * 0.04) - 0.5) * 2.0;

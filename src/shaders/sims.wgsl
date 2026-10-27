@@ -313,16 +313,21 @@ fn sim_art(s: u32, layer: u32, x: f32, y: f32, t: f32, row: u32, latest: u32) ->
         case M_LENIA: {
             let a = grid_sample(latest, p).x;
             let ink = ink_at(s, x, y, t);
-            out.alpha = smoothstep(0.04, 0.35, a);
+            // The creatures over a faint wash of the letters they live in.
+            out.alpha = max(smoothstep(0.04, 0.35, a), select(0.0, 0.18, inside_sim(p)));
             out.color = mixl(ink * 0.55, lerp(ink, WHITE, 0.35), smoothstep(0.3, 0.9, a));
             out.glow = ink * smoothstep(0.1, 0.6, a) * 0.12;
         }
         case M_SLIME: {
+            // The veins in the ink's colours, brightest where they are
+            // thickest, over a faint wash of the letters they grow in.
             let v = grid_sample(latest, p).x;
             let ink = ink_at(s, x, y, t);
-            out.alpha = clamp(v * 1.3, 0.0, 1.0);
-            out.color = mixl(ink * 0.7, lerp(ink, WHITE, 0.45), clamp(v - 0.6, 0.0, 1.0));
-            out.glow = ink * clamp(v, 0.0, 1.0) * 0.12;
+            let vein = smoothstep(0.25, 1.4, v);
+            let dish = select(0.0, 0.22, inside_sim(p));
+            out.alpha = max(vein, dish);
+            out.color = mixl(ink * 0.45, lerp(ink, WHITE, 0.5), smoothstep(0.4, 2.2, v));
+            out.glow = ink * vein * 0.15;
         }
         case M_SAND: {
             let grain = grid_load(latest, i32(x / 2.0), i32(y / 2.0));
@@ -371,28 +376,29 @@ fn frozen(x: f32, y: f32) -> Art {
 
 // ---------------------------------------------------------------- slime mold
 //
-// Agents that each sense the trail ahead, to the left and to the right,
-// turn toward the strongest, step forward and leave more trail; the trail
-// spreads and fades. The letters smell of trail too, so the network the
-// agents weave draws them.
+// Physarum, after Jones (2010): agents that each sense the trail ahead, to
+// the left and to the right, turn toward the strongest, step forward and
+// leave more trail; the trail spreads and fades. The letters are the dish:
+// the agents start spread through them and their edges turn them back, so
+// from the first moment the letters are full of fresh trail, and within a
+// few seconds it gathers into a network of veins inside them.
 
 fn agent_slot(i: u32) -> u32 { return params[H_AGENTS] + i; }
 
 /// A random point in the scene's art, or anywhere if none turns up.
 fn random_inside(i: u32, salt: u32) -> vec2<f32> {
     var p = vec2(hash(i, salt) * width(), hash(i, salt + 1u) * height());
-    for (var k = 0u; k < 8u; k++) {
+    for (var k = 0u; k < 32u; k++) {
         let q = vec2(hash(i, salt + 2u + k * 2u) * width(), hash(i, salt + 3u + k * 2u) * height());
         if inside_sim(q) { return q; }
     }
     return p;
 }
 
-fn trail(base: u32, p: vec2<f32>) -> f32 {
-    // The letters attract; away from them is bare ground, where trails
-    // count for less.
-    let t = grid_sample(base, p).x;
-    return select(t * 0.25 - 0.6, t + 1.2, inside_sim(p));
+/// What an agent smells at `p`: the trail inside the letters; outside,
+/// the dish's edge, which it turns away from.
+fn smell(base: u32, p: vec2<f32>) -> f32 {
+    return select(-1.0, grid_sample(base, p).x, inside_sim(p));
 }
 
 @compute @workgroup_size(64)
@@ -407,30 +413,40 @@ fn slime_agents(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workg
     let a = state[agent_slot(i)];
     var pos = a.xy;
     var angle = a.z;
-    let reach = 9.0;
-    let spread = 0.55;
-    let ahead = trail(src, pos + vec2(cos(angle), sin(angle)) * reach);
-    let left = trail(src, pos + vec2(cos(angle - spread), sin(angle - spread)) * reach);
-    let right = trail(src, pos + vec2(cos(angle + spread), sin(angle + spread)) * reach);
-    let turn = 0.45;
-    if ahead < left && ahead < right {
-        angle += select(-turn, turn, hash3(i, step_seed(), 13u) < 0.5);
-    } else if left > right && left > ahead {
+    let reach = 8.0;
+    let spread = 0.4;
+    let ahead = smell(src, pos + vec2(cos(angle), sin(angle)) * reach);
+    let left = smell(src, pos + vec2(cos(angle - spread), sin(angle - spread)) * reach);
+    let right = smell(src, pos + vec2(cos(angle + spread), sin(angle + spread)) * reach);
+    let turn = 0.8;
+    let coin = hash3(i, step_seed(), 13u);
+    if ahead >= left && ahead >= right {
+        angle += (coin - 0.5) * 0.1;
+    } else if ahead < left && ahead < right {
+        angle += select(-turn, turn, coin < 0.5);
+    } else if left > right {
         angle -= turn;
-    } else if right > left && right > ahead {
+    } else {
         angle += turn;
     }
-    pos += vec2(cos(angle), sin(angle)) * 1.2;
-    // Edges turn the agent around.
-    if pos.x < 1.0 || pos.y < 1.0 || pos.x > width() - 1.0 || pos.y > height() - 1.0 {
-        pos = clamp(pos, vec2(1.0), vec2(width(), height()) - 1.0);
-        angle += PI * (0.8 + 0.4 * hash3(i, step_seed(), 17u));
+    let next = pos + vec2(cos(angle), sin(angle)) * 1.0;
+    if inside_sim(next) || !inside_sim(pos) {
+        pos = clamp(next, vec2(1.0), vec2(width(), height()) - 1.0);
+    } else {
+        // The dish's edge: turn back in, somewhere new.
+        angle += PI * (0.6 + 0.8 * hash3(i, step_seed(), 17u));
+    }
+    // A few set out afresh somewhere else in the letters, so the network
+    // keeps exploring instead of thinning to a few thick veins.
+    if hash3(i, step_seed(), 23u) < 0.002 {
+        pos = random_inside(i, step_seed() * 64u + 101u);
+        angle = hash3(i, step_seed(), 29u) * TAU;
     }
     state[agent_slot(i)] = vec4(pos, angle, 0.0);
     // Leave trail where it stands; neighbours writing at once only lose a
     // little.
     let g = grid_index(u32(pos.x / 2.0), u32(pos.y / 2.0));
-    state[at(src, g)].x = min(state[at(src, g)].x + select(0.03, 0.12, inside_sim(pos)), 3.0);
+    state[at(src, g)].x = min(state[at(src, g)].x + 0.08, 4.0);
 }
 
 @compute @workgroup_size(64)
@@ -446,7 +462,9 @@ fn slime_diffuse(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_work
     for (var dy = -1; dy <= 1; dy++) {
         for (var dx = -1; dx <= 1; dx++) { sum += grid_load(src, gx + dx, gy + dy).x; }
     }
-    state[at(dst, i)] = vec4(sum / 9.0 * 0.9, 0.0, 0.0, 0.0);
+    // Half spreads to the neighbours, then a little fades.
+    let here = grid_load(src, gx, gy).x;
+    state[at(dst, i)] = vec4(mix(here, sum / 9.0, 0.5) * 0.94, 0.0, 0.0, 0.0);
 }
 
 // ---------------------------------------------------------------- sand
@@ -607,5 +625,10 @@ fn lenia(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) 
     let presets = array<vec2<f32>, 3>(vec2(0.15, 0.017), vec2(0.17, 0.02), vec2(0.13, 0.014));
     let preset = presets[variant(sim_scene()) % 3u];
     let a = state[params[src] + i].x;
-    state[at(dst, i)] = vec4(clamp(a + 0.1 * lenia_growth(u, preset.x, preset.y), 0.0, 1.0), 0.0, 0.0, 0.0);
+    // The letters are where they can live: a little way out from them the
+    // world turns hostile, so the creatures roam inside and around them.
+    let away = sdf(select(0u, 1u, sim_scene() == H_TO), p.x, p.y);
+    let hostile = smoothstep(1.0, 8.0, away) * 0.6;
+    let grown = a + 0.1 * (lenia_growth(u, preset.x, preset.y) - hostile);
+    state[at(dst, i)] = vec4(clamp(grown, 0.0, 1.0), 0.0, 0.0, 0.0);
 }

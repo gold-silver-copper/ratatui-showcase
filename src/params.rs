@@ -50,6 +50,9 @@ slots! {
         Dt,
         Post,
         Dither,
+        /// How far behind the terminal is: how much a cell may change
+        /// before it is sent again.
+        Calm,
         /// Swarm particles, and the block of the scene they draw.
         Swarm,
         SwarmScene,
@@ -72,8 +75,6 @@ slots! {
         InHomes,
         Homes,
         InArt,
-        InOrbit,
-        OrbitLen,
         FlameThreads,
         FlameSteps,
         /// The README's characters, for the text look.
@@ -83,7 +84,7 @@ slots! {
         InNoise,
         InKernel,
         /// Where each region of `state` starts (`Region`).
-        Regions: 19,
+        Regions: 21,
     }
 }
 
@@ -110,6 +111,11 @@ slots! {
         Agents,
         BgOld,
         BgNew,
+        /// What each cell shows: its glyph's shape, the glyph and the look,
+        /// for the encoder's hysteresis.
+        Shown,
+        /// Oil paint's brush strokes, two vec4s each.
+        Strokes,
         Flame,
     }
 }
@@ -133,6 +139,18 @@ slots! {
         Width,
         Glow,
         Variant,
+        /// The Mandelbrot zoom's reference orbit: where it starts in
+        /// `inputs`, and its length in steps.
+        Orbit,
+        OrbitLen,
+        /// An aimed zoom (`zoom.rs`): the view's height, turn and orbit
+        /// trap's height at the end, seconds until it arrives (0 for the
+        /// endless zoom), and iterations at the end.
+        ZoomScale,
+        ZoomTurn,
+        ZoomSpan,
+        ZoomDive,
+        ZoomLimit,
         Piece0: 12,
     }
 }
