@@ -529,8 +529,10 @@ fn frame(
         if show.caption {
             let act = &stage.act;
             let mut caption = format!(
-                "seed {}  ·  {}  ·  {}  ·  {}",
+                "seed {}  ·  {}×{}  ·  {}  ·  {}  ·  {}",
                 show.director.seed(),
+                area.width,
+                area.height,
                 act.label(),
                 act.theme().name,
                 act.shader.name()
