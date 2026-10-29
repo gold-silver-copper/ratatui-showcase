@@ -92,6 +92,20 @@ cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
   contour lines in box-drawing characters, halftone dots, or the picture
   spelled out in this README.
 
+## Between scenes
+
+After each scene a card holds for at least 10 seconds, drawn with ratatui's
+own widgets in the colours of the scene before it, calm enough to read from
+the back of a room. Two kinds take turns:
+
+- **About ratatui:** Ferris the crab snapping his claws to the beat beside
+  "ratatui" in the classic 8x8 font, and one fact about ratatui, typed out.
+- **Widgets:** live data in ratatui's built-in widgets, each box titled with
+  the widget's name: a world map that draws itself on a `Canvas` before
+  routes fly between cities, a `Sparkline`, a `BarChart` and a `Gauge`
+  counting down to the next scene; or `Tabs`, a scrolling `Chart`, a `Table`
+  of the widgets and a `LineGauge`.
+
 ## How scenes are chosen
 
 Every choice of every layer has a busyness, from plain (a vignette, the
