@@ -63,8 +63,8 @@ pub fn leave(stage: &Stage, area: Rect) -> Effect {
     }
 }
 
-/// A card comes in calmly: a soft sweep from its background.
-pub fn card_enter(bg: Rgb, area: Rect) -> Effect {
+/// The showcase comes in calmly: a soft sweep from its background.
+pub fn showcase_enter(bg: Rgb, area: Rect) -> Effect {
     let bg = bg.color();
     fx::sweep_in(
         motion(),
@@ -75,8 +75,8 @@ pub fn card_enter(bg: Rgb, area: Rect) -> Effect {
     )
 }
 
-/// A card fades into its background.
-pub fn card_leave(bg: Rgb) -> Effect {
+/// The showcase fades into its background.
+pub fn showcase_leave(bg: Rgb) -> Effect {
     let bg = bg.color();
     fx::fade_to(bg, bg, (900, Interpolation::QuadIn))
 }

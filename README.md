@@ -17,7 +17,8 @@ cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 
 | Key | Action |
 | --- | --- |
-| `Space`, `→`, `Enter` | Next scene |
+| `Space`, `Enter` | Next scene, or the next library in the showcase |
+| `→`, `←` | Switch between the shader scenes and the showcase |
 | `t` | Next colour theme |
 | `s` | Next shader |
 | `b` | Next background |
@@ -26,6 +27,7 @@ cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 | `p` | Next post-processing |
 | `w` | Next motion while holding |
 | `i` | Show or hide the caption |
+| `f` | Pause or resume: the frame stays, and the show picks up where it stopped |
 | `q`, `Esc`, `Ctrl-C` | Quit |
 
 | Option | Meaning |
@@ -94,17 +96,32 @@ cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 
 ## Between scenes
 
-After each scene a card holds for at least 10 seconds, drawn with ratatui's
-own widgets in the colours of the scene before it, calm enough to read from
-the back of a room. Two kinds take turns:
+The show takes turns between two things: a fullscreen shader scene, and the
+showcase of widgets, drawn in flat surfaces, without borders, in the
+colours of the scene before it. Under a bar that stays (ratatui's own
+`RatatuiMascot`, "ratatui" in the 8x8 font, and every library, the one
+showing lit), the libraries take turns, each filling the screen beside a
+panel on what it is, how to add it and how it's drawn:
 
-- **About ratatui:** Ferris the crab snapping his claws to the beat beside
-  "ratatui" in the classic 8x8 font, and one fact about ratatui, typed out.
-- **Widgets:** live data in ratatui's built-in widgets, each box titled with
-  the widget's name: a world map that draws itself on a `Canvas` before
-  routes fly between cities, a `Sparkline`, a `BarChart` and a `Gauge`
-  counting down to the next scene; or `Tabs`, a scrolling `Chart`, a `Table`
-  of the widgets and a `LineGauge`.
+- **ratatui's own widgets,** beside a fact about ratatui: a world map that
+  draws itself on a `Canvas` before routes fly between cities, a scrolling
+  `Chart` and `Sparkline`, a `BarChart`, a `Table` of apps built with
+  ratatui, a `LineGauge`, and a `Gauge` counting down to the next library.
+- **Libraries from its community,** from
+  [awesome-ratatui](https://github.com/ratatui/awesome-ratatui):
+  [tui-globe](https://github.com/d10n/tui-globe) turning with cities marked;
+  [edtui](https://github.com/preiter93/edtui) typing out a ratatui hello
+  world, then what it draws;
+  [ratatui-diff](https://github.com/joshka/ratatui-diff) scrolling through
+  every change to ratatui's source from 0.28.1 to 0.29.0, with syntax
+  colours, side by side when there's room;
+  [tui-qrcode](https://crates.io/crates/tui-qrcode) with a code for
+  ratatui.rs to scan from the screen;
+  [ratatui-markdown](https://github.com/celestia-island/ratatui-markdown)
+  scrolling through a page about ratatui;
+  [tui-equalizer](https://crates.io/crates/tui-equalizer) jumping on the
+  beat; and [ratatui-wireframe](https://crates.io/crates/ratatui-wireframe)
+  turning an icosahedron.
 
 ## How scenes are chosen
 
@@ -225,3 +242,14 @@ The mascot and the `RatatuiLogo` lettering come from `ratatui-widgets`, and the
 rat from ratatui's `assets/logo.svg`, both MIT licensed by the ratatui
 developers. The octant and wedge shapes in `src/glyph_table.rs` were generated
 from foot's `box-drawing.c` (MIT) by `tools/gen_glyphs.py`.
+
+`assets/ratatui-0.28-0.29.diff` is `git diff -M v0.28.1 v0.29.0 -- 'src/*.rs'`
+in the ratatui repository (MIT). The diff's syntax colours use the grammars
+and themes bundled with ratatui-diff (from syntect, two-face and bat); their
+notices are in `ratatui_diff::SyntaxHighlighter::acknowledgements()`.
+
+## License
+
+The source is MIT licensed (`LICENSE`). The program links
+[tui-globe](https://github.com/d10n/tui-globe), which is GPL-3.0-or-later, so
+a built binary is distributed under the GPL-3.0-or-later.
