@@ -313,6 +313,10 @@ struct Show {
     skip: bool,
     /// A switch asked for with the arrow keys: places along `Kind::ALL`.
     jump: isize,
+    /// Since when the show is paused, and for how long it was paused
+    /// before, in seconds since launch: its clock runs that much behind.
+    paused: Option<f64>,
+    stopped: f64,
     /// The interlude on screen, and the one that comes once what shows
     /// has left.
     interlude: Option<Interlude>,
@@ -352,6 +356,8 @@ impl Show {
             caption: true,
             skip: false,
             jump: 0,
+            paused: None,
+            stopped: 0.0,
             interlude: None,
             due: None,
             cards: 0,
@@ -466,6 +472,7 @@ fn input(
     mut resizes: MessageReader<ResizeMessage>,
     mut show: ResMut<Show>,
     mut exit: MessageWriter<AppExit>,
+    time: Res<Time>,
 ) {
     // A new mode needs a fresh stage, so its simulation starts from scratch.
     let mut rebuild = resizes.read().count() > 0;
@@ -513,6 +520,13 @@ fn input(
                     rebuild = true;
                 }
                 'i' => show.caption = !show.caption,
+                'f' => {
+                    let at = time.elapsed_secs_f64();
+                    match show.paused.take() {
+                        Some(since) => show.stopped += at - since,
+                        None => show.paused = Some(at),
+                    }
+                }
                 _ => {}
             }
         }
@@ -534,7 +548,12 @@ fn frame(
 ) -> Result {
     let show = &mut *show;
     let effects = effects.0.get_mut().unwrap_or_else(PoisonError::into_inner);
-    let now = time.elapsed_secs_f64();
+    // Paused, the last frame stays and the show's clock stands still.
+    if show.paused.is_some() {
+        gpu.idle();
+        return Ok(());
+    }
+    let now = time.elapsed_secs_f64() - show.stopped;
     // While the terminal falls behind, some frames aren't drawn at all.
     let Some(dt) = screen.due(time.delta()) else {
         gpu.idle();

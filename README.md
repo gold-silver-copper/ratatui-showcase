@@ -27,6 +27,7 @@ cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 | `p` | Next post-processing |
 | `w` | Next motion while holding |
 | `i` | Show or hide the caption |
+| `f` | Pause or resume: the frame stays, and the show picks up where it stopped |
 | `q`, `Esc`, `Ctrl-C` | Quit |
 
 | Option | Meaning |
