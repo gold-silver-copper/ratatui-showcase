@@ -286,7 +286,7 @@ impl Gallery {
             height: buf.area.height.saturating_sub(1),
             ..buf.area
         }
-        .inner(Margin::new(1, 0));
+        .inner(Margin::new(2, 1));
         // The rat needs its full height to look like itself.
         let header_h = if area.height >= 44 {
             MASCOT_H
@@ -309,14 +309,14 @@ impl Gallery {
         let side_w = (body.width.saturating_mul(3) / 10).clamp(36, 56);
         let [main, side] = if body.width >= side_w.saturating_mul(2) {
             Layout::horizontal([Constraint::Fill(1), Constraint::Length(side_w)])
-                .spacing(1)
+                .spacing(2)
                 .areas(body)
         } else {
             [body, Rect::ZERO]
         };
         Block::new().style(self.colors.surface()).render(main, buf);
         let rest = self.side(buf, side, exhibit);
-        let view = main.inner(Margin::new(1, 0));
+        let view = main.inner(Margin::new(2, 1));
         match exhibit {
             Exhibit::Globe => self.globe(buf, view, local),
             Exhibit::Code => self.code(buf, view, rest, local, each),
@@ -385,7 +385,7 @@ impl Gallery {
         Block::new().style(c.surface()).render(area, buf);
         let rail_w: u16 = if area.width >= 120 { 34 } else { 0 };
         let rat_w = if area.height >= MASCOT_H && area.width >= 100 {
-            MASCOT_W.saturating_add(2)
+            MASCOT_W.saturating_add(4)
         } else {
             0
         };
@@ -397,7 +397,7 @@ impl Gallery {
         .areas(area);
         if rat_w > 0 {
             RatatuiMascot::new().render(
-                Rect::new(rat.x.saturating_add(1), rat.y, MASCOT_W, MASCOT_H),
+                Rect::new(rat.x.saturating_add(2), rat.y, MASCOT_W, MASCOT_H),
                 buf,
             );
         }
@@ -457,7 +457,7 @@ impl Gallery {
         if rail_w > 0 {
             let slots = Layout::vertical([Constraint::Fill(1); PER_VISIT])
                 .spacing(1)
-                .split(rail.inner(Margin::new(1, 1)));
+                .split(rail.inner(Margin::new(2, 1)));
             for (i, slot) in slots.iter().enumerate() {
                 let Some(exhibit) = self.exhibit(i) else {
                     continue;
@@ -625,7 +625,7 @@ impl Gallery {
             .syntax_highlighter(SyntaxHighlighter::new("one-dark", "rs").ok())
             .line_numbers(LineNumbers::Absolute)
             .wrap(false)
-            .render(area.inner(Margin::new(0, 1)), buf);
+            .render(area, buf);
 
         if output.is_empty() {
             return;
@@ -734,7 +734,6 @@ impl Gallery {
     /// A short document about ratatui, scrolling from top to bottom.
     fn markdown(&mut self, buf: &mut Buffer, area: Rect, t: f32, each: f32) {
         let c = &self.colors;
-        let area = area.inner(Margin::new(1, 1));
         let width = area.width;
         if self.markdown.as_ref().is_none_or(|(w, _)| *w != width) {
             let theme = ThemeConfig {
@@ -769,7 +768,6 @@ impl Gallery {
     /// Bars that jump on every beat and fall back, low bands most.
     fn equalizer(&self, buf: &mut Buffer, area: Rect, t: f32, beat: f32) {
         let c = &self.colors;
-        let area = area.inner(Margin::new(0, 1));
         // More than one band to two columns would draw past the area.
         let n = usize::from(area.width / 2);
         let kick = (1.0 - beat.fract()).powi(3);

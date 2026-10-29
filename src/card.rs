@@ -137,7 +137,7 @@ impl Card {
             height: buf.area.height.saturating_sub(1),
             ..buf.area
         }
-        .inner(Margin::new(1, 0));
+        .inner(Margin::new(2, 1));
         let (title, body) = FACTS
             .get(self.index.checked_rem(FACTS.len()).unwrap_or(0))
             .copied()
@@ -224,15 +224,16 @@ impl Card {
             Constraint::Fill(2),
             Constraint::Length(3),
         ])
+        .spacing(1)
         .areas(body);
         let [map, chart] = Layout::horizontal([Constraint::Percentage(58), Constraint::Fill(1)])
-            .spacing(1)
+            .spacing(2)
             .areas(top);
         let [bars, spark, table] = Layout::horizontal([Constraint::Fill(1); 3])
-            .spacing(1)
+            .spacing(2)
             .areas(middle);
         let [line, gauge] = Layout::horizontal([Constraint::Fill(1); 2])
-            .spacing(1)
+            .spacing(2)
             .areas(bottom);
         self.world(buf, map, t);
         self.chart(buf, chart, t);
@@ -502,7 +503,7 @@ impl Colors {
         let tint = self.palette.sample(0.0);
         for y in area.top()..area.bottom() {
             let fall = 1.0 - f32::from(y) / f32::from(area.height.max(1));
-            let color = self.bg.lerp(tint, 0.07 * fall * fall);
+            let color = self.bg.lerp(tint, 0.035 * fall * fall);
             buf.set_style(
                 Rect::new(area.x, y, area.width, 1),
                 Style::new().bg(color.color()),
@@ -515,12 +516,12 @@ impl Colors {
     pub fn block<'a>(&self, title: &'a str) -> Block<'a> {
         Block::new()
             .title(Line::styled(
-                title,
+                format!("  {title}"),
                 Style::new()
                     .fg(self.accent.color())
                     .add_modifier(Modifier::BOLD),
             ))
-            .padding(Padding::horizontal(1))
+            .padding(Padding::horizontal(2))
             .style(self.surface())
     }
 
