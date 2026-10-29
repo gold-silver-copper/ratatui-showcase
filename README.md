@@ -94,14 +94,21 @@ cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 
 ## Between scenes
 
-After each scene a card holds for at least 10 seconds, drawn with ratatui's
-own widgets in the colours of the scene before it, calm enough to read from
-the back of a room: "ratatui" in the classic 8x8 font, one fact about it
-typed out, and a dashboard of built-in widgets with live data, each box
-titled with the widget's name: a world map that draws itself on a `Canvas`
-before routes fly between cities, a scrolling `Chart` and `Sparkline`, a
-`BarChart`, a `Table` of apps built with ratatui, a `LineGauge`, and a
-`Gauge` counting down to the next scene.
+After each scene comes an interlude, at least 10 seconds long. Two take
+turns:
+
+- **A card about ratatui,** drawn with its own widgets in the colours of the
+  scene before it, calm enough to read from the back of a room: "ratatui" in
+  the classic 8x8 font, one fact about it typed out, and a dashboard of
+  built-in widgets with live data, each box titled with the widget's name: a
+  world map that draws itself on a `Canvas` before routes fly between
+  cities, a scrolling `Chart` and `Sparkline`, a `BarChart`, a `Table` of
+  apps built with ratatui, a `LineGauge`, and a `Gauge` counting down to the
+  next scene.
+- **ratatui's own source as a diff:** every change to it from 0.28.1 to
+  0.29.0 scrolling past in [ratatui-diff](https://github.com/joshka/ratatui-diff),
+  with Rust syntax colours, side by side when the terminal is at least 150
+  columns wide. Each time it opens at a different file.
 
 ## How scenes are chosen
 
@@ -222,3 +229,8 @@ The mascot and the `RatatuiLogo` lettering come from `ratatui-widgets`, and the
 rat from ratatui's `assets/logo.svg`, both MIT licensed by the ratatui
 developers. The octant and wedge shapes in `src/glyph_table.rs` were generated
 from foot's `box-drawing.c` (MIT) by `tools/gen_glyphs.py`.
+
+`assets/ratatui-0.28-0.29.diff` is `git diff -M v0.28.1 v0.29.0 -- 'src/*.rs'`
+in the ratatui repository (MIT). The diff's syntax colours use the grammars
+and themes bundled with ratatui-diff (from syntect, two-face and bat); their
+notices are in `ratatui_diff::SyntaxHighlighter::acknowledgements()`.
