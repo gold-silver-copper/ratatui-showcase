@@ -571,7 +571,7 @@ fn frame(
         let Some(stage) = &show.stage else { return };
         if let Some(card) = &show.card {
             gpu.idle();
-            card.draw(buffer, now, show.tempo.phase(now));
+            card.draw(buffer, now);
         } else {
             let frame_info = gpu::Frame {
                 t: num::narrow(now - show.epoch),
@@ -600,8 +600,8 @@ fn frame(
                 area.width,
                 area.height
             );
-            if let Some(card) = &show.card {
-                caption += &format!("  ·  {}", card.name());
+            if show.card.is_some() {
+                caption += "  ·  about ratatui";
             } else {
                 caption += &format!(
                     "  ·  {}  ·  {}  ·  {}",

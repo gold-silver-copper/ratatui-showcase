@@ -1,8 +1,7 @@
-//! Cards between the scenes, drawn with ratatui's own widgets on a calm
-//! background: one about ratatui, with Ferris the crab, and one showing off
-//! the built-in widgets with live data. They take the colours of the scene
-//! before them and move gently, in time with the beat, so they stay easy
-//! to read.
+//! A card between the scenes, drawn with ratatui's own widgets on a calm
+//! background: "ratatui" in the 8x8 font, a fact about it typed out, and
+//! a dashboard of built-in widgets with live data. It takes the colours of
+//! the scene before it and moves gently, so it stays easy to read.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
@@ -12,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::canvas::{Canvas, Line as Stroke, Map, MapResolution, Points};
 use ratatui::widgets::{
     Axis, Bar, BarChart, BarGroup, Block, BorderType, Chart, Dataset, Gauge, GraphType, LineGauge,
-    Padding, Paragraph, Row, Sparkline, StatefulWidget, Table, TableState, Tabs, Widget,
+    Paragraph, Row, Sparkline, StatefulWidget, Table, TableState, Widget,
 };
 
 use crate::art;
@@ -62,22 +61,19 @@ const FACTS: &[(&str, &str)] = &[
     (
         "Open source",
         "MIT licensed and built by its community, ratatui carries on the tui-rs \
-         crate. Apps like gitui, yazi, bottom and atuin are built with it.",
+         crate. Apps like codex, herdr, gitui, yazi, bottom and atuin are built with it.",
     ),
 ];
 
-/// The widgets the showcase names: its table and tabs.
-const WIDGETS: &[(&str, &str)] = &[
-    ("Block", "borders, titles and padding"),
-    ("Paragraph", "styled, wrapped text"),
-    ("List", "items to scroll and select"),
-    ("Table", "rows and columns, like this one"),
-    ("Tabs", "a row of titles, one selected"),
-    ("Chart", "lines and scatter plots on axes"),
-    ("Canvas", "free drawing: shapes, maps"),
-    ("BarChart", "labelled bars, side by side"),
-    ("Sparkline", "a small line of recent values"),
-    ("Gauge", "progress, as a bar or a line"),
+/// Apps built with ratatui, for the table.
+const APPS: &[(&str, &str)] = &[
+    ("codex", "OpenAI's coding agent"),
+    ("herdr", "an AI agent multiplexer"),
+    ("gitui", "git, fast"),
+    ("yazi", "a file manager"),
+    ("bottom", "a system monitor"),
+    ("atuin", "shell history, searched"),
+    ("oha", "HTTP load testing"),
 ];
 
 /// Cities on the map, `(longitude, latitude)`, and the routes between them.
@@ -107,59 +103,8 @@ const ROUTES: &[(usize, usize)] = &[
 const DRAW: f32 = 3.5;
 const FLIGHT: f32 = 1.6;
 
-/// Ferris, in half-block pixels: `o` shell, `d` shade, `w` and `e` the
-/// parts of an eye a blink closes, `k` the rest of it, `m` the mouth.
-const FERRIS: &[&str] = &[
-    ".oo..oo....................oo..oo.",
-    "oo....oo..................oo....oo",
-    "oo....oo..................oo....oo",
-    "ooo..ooo..................ooo..ooo",
-    ".oooooo....................oooooo.",
-    "..oooo.......o......o.......oooo..",
-    "...dd.....o.ooo.oo.ooo.o.....dd...",
-    "....dd...oooooooooooooooo...dd....",
-    ".....dd.oooooweooooewooooo.dd.....",
-    "......oooooooeeooooeeooooooo......",
-    "......oooooookkooookkooooooo......",
-    ".....oooooooooooooooooooooooo.....",
-    "....oooooooooooooooooooooooooo....",
-    "...d.oooooooooooooooooooooooo.d...",
-    "..d..oooooooooommmmoooooooooo..d..",
-    "..d...oooooooooommoooooooooo...d..",
-    "...d...oooooooooooooooooooo...d...",
-    "....d...oddoooddooddoooddo...d....",
-    "......d..d...d..dd..d...d..d......",
-];
-/// The claws' first rows when they snap shut.
-const SNAP: &[&str] = &[
-    "..ooo........................ooo..",
-    ".ooooo......................ooooo.",
-    "ooooooo....................ooooooo",
-    ".oooooo....................oooooo.",
-];
-const FERRIS_W: usize = 34;
-const FERRIS_H: usize = 19;
-
-/// Pixels between Ferris and the word.
-const GAP: usize = 4;
-
-/// How the about card's heading is laid out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Head {
-    Side,
-    Stacked,
-    Alone,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    About,
-    Widgets,
-}
-
 pub struct Card {
-    kind: Kind,
-    /// Which fact, or which set of widgets.
+    /// Which fact.
     index: usize,
     colors: Colors,
     started: f64,
@@ -168,25 +113,13 @@ pub struct Card {
 }
 
 impl Card {
-    /// The `n`th card of the show: about and widgets take turns.
+    /// The `n`th card of the show.
     pub fn new(n: usize, palette: &Palette, now: f64, hold: f64) -> Self {
         Self {
-            kind: if n.is_multiple_of(2) {
-                Kind::About
-            } else {
-                Kind::Widgets
-            },
-            index: n.checked_div(2).unwrap_or(0),
+            index: n,
             colors: Colors::new(palette),
             started: now,
             hold,
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self.kind {
-            Kind::About => "about ratatui",
-            Kind::Widgets => "widgets",
         }
     }
 
@@ -194,20 +127,120 @@ impl Card {
         self.colors.bg
     }
 
-    /// Draws the card at `now`, with `beat` the show's beats.
-    pub fn draw(&self, buf: &mut Buffer, now: f64, beat: f32) {
+    /// Draws the card at `now`.
+    pub fn draw(&self, buf: &mut Buffer, now: f64) {
         let t = num::narrow(now - self.started);
-        let area = buf.area;
+        let c = &self.colors;
         self.backdrop(buf);
         // The bottom row is the caption's.
         let area = Rect {
-            height: area.height.saturating_sub(1),
-            ..area
-        };
-        match self.kind {
-            Kind::About => self.about(buf, area, t, beat),
-            Kind::Widgets => self.widgets(buf, area, t, beat),
+            height: buf.area.height.saturating_sub(1),
+            ..buf.area
         }
+        .inner(Margin::new(2, 1));
+        let (title, body) = FACTS
+            .get(self.index.checked_rem(FACTS.len()).unwrap_or(0))
+            .copied()
+            .unwrap_or_default();
+        let lines = wrap(body, usize::from(area.width.min(100)));
+        let word = art::pixel_font("ratatui");
+        // The heading takes at most a sixth of the height.
+        let scale = (1..=6).rev().find(|&s: &usize| {
+            word.width.saturating_mul(s) <= usize::from(area.width).saturating_mul(3) / 5
+                && s.saturating_mul(4) <= usize::from(area.height) / 6
+        });
+        let head_h = scale.map_or(1, |s| num::u16_of(s.saturating_mul(4)));
+        let [head, _, heading, text, footer, _, body] = Layout::vertical([
+            Constraint::Length(head_h),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(num::u16_of(lines.len())),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+
+        match scale {
+            Some(s) => {
+                let left = head.x.saturating_add(
+                    head.width
+                        .saturating_sub(num::u16_of(word.width.saturating_mul(s)))
+                        / 2,
+                );
+                let width = word.width.max(1);
+                // Letters arrive one by one, then hold still.
+                let shown = num::floor_usize((t - 0.3) * 10.0);
+                let top = usize::from(head.y).saturating_mul(2);
+                pixels(buf, left, top, (word.width, 8), s, |x, y| {
+                    (x / 8 < shown && word.get(x, y).ink > 0.5).then(|| {
+                        c.palette
+                            .sample(0.55 * num::float(x) / num::float(width))
+                            .lerp(Rgb::WHITE, 0.15)
+                    })
+                });
+            }
+            None => Line::styled("ratatui", Style::new().fg(c.accent.color()).bold())
+                .centered()
+                .render(head, buf),
+        }
+
+        // The fact, typed out.
+        Line::styled(title, Style::new().fg(c.accent.color()).bold())
+            .centered()
+            .render(heading, buf);
+        let mut left = num::floor_usize((t - 0.8) * 55.0);
+        let typing = left < lines.iter().map(|l| l.chars().count()).sum();
+        let mut typed: Vec<Line> = Vec::new();
+        for line in &lines {
+            let n = line.chars().count().min(left);
+            left = left.saturating_sub(n);
+            let mut spans = vec![Span::raw(line.chars().take(n).collect::<String>())];
+            let cut = typing && n < line.chars().count();
+            if cut {
+                spans.push(Span::styled("▌", Style::new().fg(c.accent.color())));
+            }
+            typed.push(Line::from(spans));
+            if cut {
+                break;
+            }
+        }
+        Paragraph::new(typed)
+            .style(Style::new().fg(c.text.color()))
+            .alignment(Alignment::Center)
+            .render(text, buf);
+        Line::from(vec![
+            Span::styled("ratatui.rs", Style::new().fg(c.dim.color())),
+            Span::styled("   ·   ", Style::new().fg(c.dim.color())),
+            Span::styled("cargo add ratatui", Style::new().fg(c.accent.color())),
+        ])
+        .centered()
+        .render(footer, buf);
+
+        // Built-in widgets, each box titled with its name.
+        let progress = (f64::from(t) / self.hold.max(1.0)).clamp(0.0, 1.0);
+        let [top, middle, bottom] = Layout::vertical([
+            Constraint::Fill(3),
+            Constraint::Fill(2),
+            Constraint::Length(3),
+        ])
+        .areas(body);
+        let [map, chart] = Layout::horizontal([Constraint::Percentage(58), Constraint::Fill(1)])
+            .spacing(1)
+            .areas(top);
+        let [bars, spark, table] = Layout::horizontal([Constraint::Fill(1); 3])
+            .spacing(1)
+            .areas(middle);
+        let [line, gauge] = Layout::horizontal([Constraint::Fill(1); 2])
+            .spacing(1)
+            .areas(bottom);
+        self.world(buf, map, t);
+        self.chart(buf, chart, t);
+        self.bars(buf, bars, t);
+        self.sparkline(buf, spark, t);
+        self.table(buf, table, t);
+        self.line_gauge(buf, line, t);
+        self.gauge(buf, gauge, progress);
     }
 
     /// A still, faint glow of the theme's first colour from the top.
@@ -221,263 +254,6 @@ impl Card {
                 Rect::new(area.x, y, area.width, 1),
                 Style::new().bg(color.color()),
             );
-        }
-    }
-
-    fn about(&self, buf: &mut Buffer, area: Rect, t: f32, beat: f32) {
-        let c = &self.colors;
-        let (title, body) = FACTS
-            .get(self.index.checked_rem(FACTS.len()).unwrap_or(0))
-            .copied()
-            .unwrap_or_default();
-        let panel_w = area.width.saturating_sub(4).min(80);
-        let lines = wrap(body, usize::from(panel_w.saturating_sub(8)));
-        let panel_h = num::u16_of(lines.len()).saturating_add(4);
-
-        let word = art::pixel_font("ratatui");
-        // Rows below the heading: a gap, the tagline, a gap, the panel, a
-        // gap and the footer.
-        let below = panel_h.saturating_add(6);
-        let room_h = usize::from(area.height.saturating_sub(below)).saturating_mul(2);
-        let fit = |(w, h): (usize, usize)| {
-            (1..=12).rev().find(|&s: &usize| {
-                w.saturating_mul(s) <= usize::from(area.width).saturating_mul(9) / 10
-                    && h.saturating_mul(s) <= room_h
-            })
-        };
-        // Ferris beside the word or above it, whichever shows them larger,
-        // else the word alone; sizes in pixels.
-        let side = (
-            FERRIS_W.saturating_add(GAP).saturating_add(word.width),
-            FERRIS_H,
-        );
-        let stacked = (
-            FERRIS_W.max(word.width),
-            FERRIS_H.saturating_add(GAP).saturating_add(8),
-        );
-        let alone = (word.width, 8);
-        // Ties go to the later one: Ferris, beside the word if he can.
-        let head = [
-            (Head::Alone, alone),
-            (Head::Stacked, stacked),
-            (Head::Side, side),
-        ]
-        .into_iter()
-        .filter_map(|(head, size)| Some((head, size, fit(size)?)))
-        .max_by_key(|&(_, _, s)| s);
-        let head_h = head.map_or(1, |(_, (_, h), s)| {
-            num::u16_of(h.saturating_mul(s).div_ceil(2))
-        });
-        let total = head_h.saturating_add(below);
-        let top = area.y.saturating_add(area.height.saturating_sub(total) / 2);
-
-        // The heading: Ferris and the word in the 8x8 font.
-        match head {
-            Some((head, (w, _), s)) => {
-                let centre = |w: usize| {
-                    area.x.saturating_add(
-                        area.width.saturating_sub(num::u16_of(w.saturating_mul(s))) / 2,
-                    )
-                };
-                let half_top = usize::from(top).saturating_mul(2);
-                let left = centre(w);
-                let below_ferris = FERRIS_H.saturating_add(GAP).saturating_mul(s);
-                let (word_left, word_top) = match head {
-                    Head::Side => (
-                        left.saturating_add(num::u16_of(
-                            FERRIS_W.saturating_add(GAP).saturating_mul(s),
-                        )),
-                        half_top.saturating_add(FERRIS_H.saturating_sub(8).saturating_mul(s) / 2),
-                    ),
-                    Head::Stacked => (centre(word.width), half_top.saturating_add(below_ferris)),
-                    Head::Alone => (left, half_top),
-                };
-                match head {
-                    Head::Side => self.ferris(buf, left, half_top, s, t, beat),
-                    Head::Stacked => self.ferris(buf, centre(FERRIS_W), half_top, s, t, beat),
-                    Head::Alone => {}
-                }
-                let width = word.width.max(1);
-                // Letters arrive one by one, then hold still.
-                let shown = num::floor_usize((t - 0.3) * 10.0);
-                pixels(buf, word_left, word_top, (word.width, 8), s, |x, y| {
-                    (x / 8 < shown && word.get(x, y).ink > 0.5).then(|| {
-                        c.palette
-                            .sample(0.55 * num::float(x) / num::float(width))
-                            .lerp(Rgb::WHITE, 0.15)
-                    })
-                });
-            }
-            None => {
-                let line = Line::styled("ratatui", Style::new().fg(c.accent.color()).bold());
-                line.centered()
-                    .render(Rect::new(area.x, top, area.width, 1), buf);
-            }
-        }
-
-        let mut y = top.saturating_add(head_h).saturating_add(1);
-        Line::styled(
-            "Terminal user interfaces in Rust",
-            Style::new().fg(c.dim.color()),
-        )
-        .centered()
-        .render(Rect::new(area.x, y, area.width, 1), buf);
-        y = y.saturating_add(2);
-
-        // The fact, typed out.
-        let panel = Rect::new(
-            area.x
-                .saturating_add(area.width.saturating_sub(panel_w) / 2),
-            y,
-            panel_w,
-            panel_h,
-        )
-        .intersection(area);
-        let mut left = num::floor_usize((t - 0.8) * 55.0);
-        let typing = left < lines.iter().map(|l| l.chars().count()).sum();
-        let mut text: Vec<Line> = Vec::new();
-        for line in &lines {
-            let n = line.chars().count().min(left);
-            left = left.saturating_sub(n);
-            let mut spans = vec![Span::raw(line.chars().take(n).collect::<String>())];
-            if typing && n < line.chars().count() {
-                spans.push(Span::styled("▌", Style::new().fg(c.accent.color())));
-                text.push(Line::from(spans));
-                break;
-            }
-            text.push(Line::from(spans));
-        }
-        Paragraph::new(text)
-            .style(Style::new().fg(c.text.color()))
-            .alignment(Alignment::Center)
-            .block(
-                self.block(title)
-                    .title_alignment(Alignment::Center)
-                    .padding(Padding::new(3, 3, 1, 1)),
-            )
-            .render(panel, buf);
-        y = y.saturating_add(panel_h).saturating_add(1);
-
-        Line::from(vec![
-            Span::styled("ratatui.rs", Style::new().fg(c.text.color())),
-            Span::styled("   ·   ", Style::new().fg(c.dim.color())),
-            Span::styled("cargo add ratatui", Style::new().fg(c.accent.color())),
-        ])
-        .centered()
-        .render(Rect::new(area.x, y, area.width, 1).intersection(area), buf);
-    }
-
-    /// Ferris at `left`, `top` (in half rows): the claws snap on every
-    /// other beat, and now and then a blink.
-    fn ferris(&self, buf: &mut Buffer, left: u16, top: usize, scale: usize, t: f32, beat: f32) {
-        let snap = num::floor_u32(beat).is_multiple_of(2) && beat.fract() < 0.22;
-        let blink = t.rem_euclid(4.3) > 4.15;
-        let orange = Rgb::hex(0xf74c00);
-        let shade = Rgb::hex(0xa52b00);
-        pixels(buf, left, top, (FERRIS_W, FERRIS_H), scale, |x, y| {
-            let row = if snap {
-                SNAP.get(y).or_else(|| FERRIS.get(y))
-            } else {
-                FERRIS.get(y)
-            };
-            match row?.chars().nth(x)? {
-                'o' => Some(orange),
-                'd' => Some(shade),
-                'w' if blink => Some(orange),
-                'e' if blink => Some(orange),
-                'w' => Some(Rgb::WHITE),
-                'e' | 'k' | 'm' => Some(Rgb::hex(0x1a0a04)),
-                _ => None,
-            }
-        });
-    }
-
-    fn widgets(&self, buf: &mut Buffer, area: Rect, t: f32, beat: f32) {
-        let c = &self.colors;
-        let word = art::pixel_font("widgets");
-        let scale = (1..=3).rev().find(|&s: &usize| {
-            word.width.saturating_mul(s) <= usize::from(area.width) / 2
-                && usize::from(area.height) >= s.saturating_mul(4).saturating_mul(6)
-        });
-        let head_h = scale.map_or(1, |s| num::u16_of(s.saturating_mul(4)));
-        let [head, tagline, body] = Layout::vertical([
-            Constraint::Length(head_h),
-            Constraint::Length(2),
-            Constraint::Fill(1),
-        ])
-        .areas(area.inner(Margin::new(2, 1)));
-        match scale {
-            Some(s) => {
-                let left = head.x.saturating_add(
-                    head.width
-                        .saturating_sub(num::u16_of(word.width.saturating_mul(s)))
-                        / 2,
-                );
-                let width = word.width.max(1);
-                pixels(
-                    buf,
-                    left,
-                    usize::from(head.y).saturating_mul(2),
-                    (word.width, 8),
-                    s,
-                    |x, y| {
-                        (word.get(x, y).ink > 0.5).then(|| {
-                            c.palette
-                                .sample(0.5 + 0.55 * num::float(x) / num::float(width))
-                                .lerp(Rgb::WHITE, 0.15)
-                        })
-                    },
-                );
-            }
-            None => Line::styled("widgets", Style::new().fg(c.accent.color()).bold())
-                .centered()
-                .render(head, buf),
-        }
-        Line::styled(
-            "Every box is a widget that comes with ratatui",
-            Style::new().fg(c.dim.color()),
-        )
-        .centered()
-        .render(tagline, buf);
-
-        let progress = (f64::from(t) / self.hold.max(1.0)).clamp(0.0, 1.0);
-        if self.index.is_multiple_of(2) {
-            let [map, side] = Layout::horizontal([Constraint::Percentage(62), Constraint::Fill(1)])
-                .spacing(1)
-                .areas(body);
-            self.world(buf, map, t);
-            let [spark, bars, gauge] = Layout::vertical([
-                Constraint::Percentage(30),
-                Constraint::Fill(1),
-                Constraint::Length(3),
-            ])
-            .areas(side);
-            self.sparkline(buf, spark, t);
-            self.bars(buf, bars, t);
-            self.gauge(buf, gauge, progress);
-        } else {
-            let [tabs, middle, gauges] = Layout::vertical([
-                Constraint::Length(3),
-                Constraint::Fill(1),
-                Constraint::Length(3),
-            ])
-            .areas(body);
-            let [chart, table] =
-                Layout::horizontal([Constraint::Percentage(55), Constraint::Fill(1)])
-                    .spacing(1)
-                    .areas(middle);
-            let [line, gauge] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)])
-                .spacing(1)
-                .areas(gauges);
-            // The table's highlight and the selected tab move together.
-            let selected = num::floor_usize(beat / 2.0)
-                .checked_rem(WIDGETS.len())
-                .unwrap_or(0);
-            self.tabs(buf, tabs, selected);
-            self.chart(buf, chart, t);
-            self.table(buf, table, selected);
-            self.line_gauge(buf, line, t);
-            self.gauge(buf, gauge, progress);
         }
     }
 
@@ -652,19 +428,24 @@ impl Card {
             .render(area, buf);
     }
 
-    fn tabs(&self, buf: &mut Buffer, area: Rect, selected: usize) {
+    /// Apps built with ratatui, the highlight moving down them.
+    fn table(&self, buf: &mut Buffer, area: Rect, t: f32) {
         let c = &self.colors;
-        Tabs::new(WIDGETS.iter().map(|&(name, _)| name))
-            .block(self.block("Tabs"))
-            .style(Style::new().fg(c.dim.color()))
-            .highlight_style(
+        let selected = num::floor_usize(t / 1.5)
+            .checked_rem(APPS.len())
+            .unwrap_or(0);
+        let rows = APPS.iter().map(|&(name, what)| Row::new([name, what]));
+        let table = Table::new(rows, [Constraint::Length(7), Constraint::Fill(1)])
+            .block(self.block("Table · built with ratatui"))
+            .column_spacing(2)
+            .row_highlight_style(
                 Style::new()
-                    .fg(c.accent.color())
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                    .bg(c.palette.sample(0.4).lerp(c.panel, 0.55).color())
+                    .fg(Rgb::WHITE.color()),
             )
-            .divider(Span::styled("·", Style::new().fg(c.border.color())))
-            .select(selected)
-            .render(area, buf);
+            .highlight_symbol("▶ ");
+        let mut state = TableState::default().with_selected(Some(selected));
+        StatefulWidget::render(table, area, buf, &mut state);
     }
 
     /// Two signals scrolling past.
@@ -711,31 +492,6 @@ impl Card {
                     .style(axis),
             )
             .render(area, buf);
-    }
-
-    fn table(&self, buf: &mut Buffer, area: Rect, selected: usize) {
-        let c = &self.colors;
-        let rows = WIDGETS.iter().map(|&(name, what)| Row::new([name, what]));
-        let table = Table::new(rows, [Constraint::Length(10), Constraint::Fill(1)])
-            .block(self.block("Table"))
-            .header(
-                Row::new(["Widget", "What it shows"])
-                    .style(
-                        Style::new()
-                            .fg(c.accent.color())
-                            .add_modifier(Modifier::BOLD),
-                    )
-                    .bottom_margin(1),
-            )
-            .column_spacing(2)
-            .row_highlight_style(
-                Style::new()
-                    .bg(c.palette.sample(0.4).lerp(c.panel, 0.55).color())
-                    .fg(Rgb::WHITE.color()),
-            )
-            .highlight_symbol("▶ ");
-        let mut state = TableState::default().with_selected(Some(selected));
-        StatefulWidget::render(table, area, buf, &mut state);
     }
 }
 
@@ -889,12 +645,12 @@ mod tests {
 
     #[test]
     fn cards_draw_at_any_size() {
-        for n in 0..4 {
+        for n in 0..2 {
             let card = Card::new(n, &Palette::first(), 0.0, 10.0);
             for (w, h) in [(1, 1), (12, 4), (40, 12), (80, 24), (400, 120)] {
                 for t in [0.0, 2.0, 6.0, 30.0] {
                     let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
-                    card.draw(&mut buf, t, 3.5);
+                    card.draw(&mut buf, t);
                 }
             }
         }
