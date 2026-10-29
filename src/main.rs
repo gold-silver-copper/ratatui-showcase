@@ -4,6 +4,7 @@
 mod art;
 mod backdrop;
 mod card;
+mod diff;
 mod director;
 mod fonts;
 mod fx;
@@ -41,6 +42,7 @@ use tachyonfx::EffectManager;
 
 use crate::backdrop::{BACKDROPS, Backdrop};
 use crate::card::Card;
+use crate::diff::DiffView;
 use crate::director::{Director, Pin};
 use crate::fonts::SystemFonts;
 use crate::glyphs::{GlyphSet, Glyphs};
@@ -147,6 +149,7 @@ fn main() -> ExitCode {
             return code;
         }
     };
+    diff::warm();
     let exit = App::new()
         .add_plugins((
             DefaultPlugins
@@ -217,8 +220,45 @@ enum Phase {
     Leaving,
 }
 
-/// Scenes between two cards.
+/// Scenes between two interludes.
 const SCENES_PER_CARD: usize = 1;
+
+/// What plays between scenes: the card about ratatui and the diff of its
+/// source take turns.
+enum Interlude {
+    Card(Card),
+    Diff(Box<DiffView>),
+}
+
+impl Interlude {
+    fn hold(&self) -> f64 {
+        match self {
+            Interlude::Card(card) => card.hold,
+            Interlude::Diff(diff) => diff.hold,
+        }
+    }
+
+    fn background(&self) -> theme::Rgb {
+        match self {
+            Interlude::Card(card) => card.background(),
+            Interlude::Diff(_) => DiffView::background(),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Interlude::Card(_) => "about ratatui",
+            Interlude::Diff(_) => "ratatui 0.28 → 0.29 in ratatui-diff",
+        }
+    }
+
+    fn draw(&mut self, buf: &mut ratatui::buffer::Buffer, now: f64, dt: f32) {
+        match self {
+            Interlude::Card(card) => card.draw(buf, now),
+            Interlude::Diff(diff) => diff.draw(buf, now, dt),
+        }
+    }
+}
 
 #[derive(Resource)]
 struct Show {
@@ -238,11 +278,12 @@ struct Show {
     hold_until: f64,
     caption: bool,
     skip: bool,
-    /// The card on screen, and whether one comes once the scene has left.
-    card: Option<Card>,
-    card_due: bool,
-    /// Cards shown so far, and scenes since the last.
-    cards: usize,
+    /// The interlude on screen, and whether one comes once the scene has
+    /// left.
+    interlude: Option<Interlude>,
+    interlude_due: bool,
+    /// Interludes shown so far, and scenes since the last.
+    interludes: usize,
     scenes: usize,
     /// The next scene, laid out in the background while this one holds.
     next: Option<(u16, u16, Task<Stage>)>,
@@ -273,9 +314,9 @@ impl Show {
             hold_until: f64::MAX,
             caption: true,
             skip: false,
-            card: None,
-            card_due: false,
-            cards: 0,
+            interlude: None,
+            interlude_due: false,
+            interludes: 0,
             scenes: 0,
             next: None,
             director,
@@ -286,7 +327,7 @@ impl Show {
     /// The scene starts holding at `now`, until the first bar line a hold
     /// later.
     fn hold_from(&mut self, now: f64) {
-        let hold = self.card.as_ref().map_or(self.hold, |card| card.hold);
+        let hold = self.interlude.as_ref().map_or(self.hold, Interlude::hold);
         self.phase = Phase::Holding;
         self.prepare_at = now + hold * 0.2;
         self.hold_until = self.tempo.next_bar(now + hold);
@@ -298,13 +339,19 @@ impl Show {
         };
     }
 
-    /// The next card, in the colours of the scene before it.
-    fn new_card(&mut self, now: f64) -> Card {
-        let act = self.stage.as_ref().map_or(&self.act, |stage| &stage.act);
-        let hold = self.tempo.bars(self.hold.max(card::HOLD));
-        let card = Card::new(self.cards, act.theme(), now, hold);
-        self.cards = self.cards.saturating_add(1);
-        card
+    /// The next interlude; a card takes the colours of the scene before it.
+    fn new_interlude(&mut self, now: f64) -> Interlude {
+        let n = self.interludes;
+        self.interludes = n.saturating_add(1);
+        let turn = n.checked_div(2).unwrap_or(0);
+        if n.is_multiple_of(2) {
+            let act = self.stage.as_ref().map_or(&self.act, |stage| &stage.act);
+            let hold = self.tempo.bars(self.hold.max(card::HOLD));
+            Interlude::Card(Card::new(turn, act.theme(), now, hold))
+        } else {
+            let hold = self.tempo.bars(self.hold.max(diff::HOLD));
+            Interlude::Diff(Box::new(DiffView::new(turn, now, hold)))
+        }
     }
 
     /// Starts laying out the scene after `current` on another thread.
@@ -463,12 +510,12 @@ fn frame(
             // A half-finished transition would play on the old layout: settle it.
             if let Some(pending) = show.pending.take() {
                 show.act = pending.act;
-                show.card = None;
+                show.interlude = None;
             } else {
                 show.act = act;
             }
-            if std::mem::take(&mut show.card_due) {
-                show.card = Some(show.new_card(now));
+            if std::mem::take(&mut show.interlude_due) {
+                show.interlude = Some(show.new_interlude(now));
             }
             effects.transition.cancel_unique_effect(());
             effects.accent.cancel_unique_effect(());
@@ -501,7 +548,7 @@ fn frame(
                 }
                 if now >= show.accent_at {
                     show.accent_at = f64::MAX;
-                    if show.card.is_none()
+                    if show.interlude.is_none()
                         && let Some(stage) = &show.stage
                         && let Some(accent) = fx::accent(stage, area)
                     {
@@ -510,10 +557,10 @@ fn frame(
                 }
                 if skip || now >= show.hold_until {
                     effects.accent.cancel_unique_effect(());
-                    if let Some(card) = &show.card {
+                    if let Some(interlude) = &show.interlude {
                         effects
                             .transition
-                            .add_unique_effect((), fx::card_leave(card.background()));
+                            .add_unique_effect((), fx::card_leave(interlude.background()));
                         if let Some(stage) = &show.stage {
                             let act = stage.act.clone();
                             show.pending =
@@ -529,7 +576,7 @@ fn frame(
                                     .transition
                                     .add_unique_effect((), fx::leave(stage, area));
                             }
-                            show.card_due = true;
+                            show.interlude_due = true;
                             show.phase = Phase::Leaving;
                         } else {
                             change(show, effects, &fonts, area, now);
@@ -547,14 +594,14 @@ fn frame(
                 }
             }
             Phase::Leaving if !effects.transition.is_running() => {
-                if std::mem::take(&mut show.card_due) {
-                    let card = show.new_card(now);
+                if std::mem::take(&mut show.interlude_due) {
+                    let interlude = show.new_interlude(now);
                     effects
                         .transition
-                        .add_unique_effect((), fx::card_enter(card.background(), area));
-                    show.card = Some(card);
+                        .add_unique_effect((), fx::card_enter(interlude.background(), area));
+                    show.interlude = Some(interlude);
                 } else if let Some(stage) = show.pending.take() {
-                    show.card = None;
+                    show.interlude = None;
                     // The old scene is gone: a good moment for the clock to
                     // start over unseen.
                     show.rebase(now, 600.0);
@@ -569,9 +616,9 @@ fn frame(
         }
 
         let Some(stage) = &show.stage else { return };
-        if let Some(card) = &show.card {
+        if let Some(interlude) = &mut show.interlude {
             gpu.idle();
-            card.draw(buffer, now, show.tempo.phase(now));
+            interlude.draw(buffer, now, dt.as_secs_f32());
         } else {
             let frame_info = gpu::Frame {
                 t: num::narrow(now - show.epoch),
@@ -600,8 +647,8 @@ fn frame(
                 area.width,
                 area.height
             );
-            if let Some(card) = &show.card {
-                caption += &format!("  ·  {}", card.name());
+            if let Some(interlude) = &show.interlude {
+                caption += &format!("  ·  {}", interlude.name());
             } else {
                 caption += &format!(
                     "  ·  {}  ·  {}  ·  {}",
