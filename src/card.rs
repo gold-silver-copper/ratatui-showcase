@@ -10,8 +10,8 @@ use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::canvas::{Canvas, Line as Stroke, Map, MapResolution, Points};
 use ratatui::widgets::{
-    Axis, Bar, BarChart, BarGroup, Block, BorderType, Chart, Dataset, Gauge, GraphType, Paragraph,
-    Widget,
+    Axis, Bar, BarChart, BarGroup, Block, BorderType, Chart, Dataset, Gauge, GraphType, LineGauge,
+    Paragraph, Row, Sparkline, StatefulWidget, Table, TableState, Widget,
 };
 
 use crate::art;
@@ -61,8 +61,18 @@ const FACTS: &[(&str, &str)] = &[
     (
         "Open source",
         "MIT licensed and built by its community, ratatui carries on the tui-rs \
-         crate. Apps like gitui, yazi, bottom and atuin are built with it.",
+         crate. Apps like codex, gitui, yazi, bottom and atuin are built with it.",
     ),
+];
+
+/// Apps built with ratatui, for the table.
+const APPS: &[(&str, &str)] = &[
+    ("codex", "OpenAI's coding agent"),
+    ("gitui", "git, fast"),
+    ("yazi", "a file manager"),
+    ("bottom", "a system monitor"),
+    ("atuin", "shell history, searched"),
+    ("oha", "HTTP load testing"),
 ];
 
 /// Cities on the map, `(longitude, latitude)`, and the routes between them.
@@ -208,18 +218,27 @@ impl Card {
 
         // Built-in widgets, each box titled with its name.
         let progress = (f64::from(t) / self.hold.max(1.0)).clamp(0.0, 1.0);
-        let [map, side] = Layout::horizontal([Constraint::Percentage(58), Constraint::Fill(1)])
-            .spacing(1)
-            .areas(body);
-        let [chart, bars, gauge] = Layout::vertical([
-            Constraint::Fill(1),
-            Constraint::Fill(1),
+        let [top, middle, bottom] = Layout::vertical([
+            Constraint::Fill(3),
+            Constraint::Fill(2),
             Constraint::Length(3),
         ])
-        .areas(side);
+        .areas(body);
+        let [map, chart] = Layout::horizontal([Constraint::Percentage(58), Constraint::Fill(1)])
+            .spacing(1)
+            .areas(top);
+        let [bars, spark, table] = Layout::horizontal([Constraint::Fill(1); 3])
+            .spacing(1)
+            .areas(middle);
+        let [line, gauge] = Layout::horizontal([Constraint::Fill(1); 2])
+            .spacing(1)
+            .areas(bottom);
         self.world(buf, map, t);
         self.chart(buf, chart, t);
         self.bars(buf, bars, t);
+        self.sparkline(buf, spark, t);
+        self.table(buf, table, t);
+        self.line_gauge(buf, line, t);
         self.gauge(buf, gauge, progress);
     }
 
@@ -310,6 +329,30 @@ impl Card {
         }
     }
 
+    fn sparkline(&self, buf: &mut Buffer, area: Rect, t: f32) {
+        let c = &self.colors;
+        let block = self.block("Sparkline");
+        let n = usize::from(block.inner(area).width);
+        // A new value four times a second; the line scrolls left.
+        let start = num::floor_usize(t * 4.0);
+        let data: Vec<u64> = (start..start.saturating_add(n))
+            .map(|k| {
+                let k = num::float(k);
+                let v = 45.0
+                    + 22.0 * (k * 0.21).sin()
+                    + 16.0 * (k * 0.067 + 1.3).sin()
+                    + 12.0 * jitter(k);
+                u64::from(num::floor_u32(v))
+            })
+            .collect();
+        Sparkline::default()
+            .block(block)
+            .data(&data)
+            .max(100)
+            .style(Style::new().fg(c.palette.sample(0.15).lerp(Rgb::WHITE, 0.1).color()))
+            .render(area, buf);
+    }
+
     fn bars(&self, buf: &mut Buffer, area: Rect, t: f32) {
         let c = &self.colors;
         let block = self.block("BarChart");
@@ -367,6 +410,41 @@ impl Card {
                 Style::new().fg(c.text.color()).add_modifier(Modifier::BOLD),
             ))
             .render(area, buf);
+    }
+
+    fn line_gauge(&self, buf: &mut Buffer, area: Rect, t: f32) {
+        let c = &self.colors;
+        let ratio = 0.55 + 0.3 * (t * 0.45).sin() * (t * 0.17 + 0.6).cos();
+        LineGauge::default()
+            .block(self.block("LineGauge"))
+            .filled_style(Style::new().fg(c.palette.sample(0.7).lerp(Rgb::WHITE, 0.1).color()))
+            .unfilled_style(Style::new().fg(c.border.color()))
+            .ratio(f64::from(ratio).clamp(0.0, 1.0))
+            .label(Span::styled(
+                format!("memory {:>3.0}%", ratio * 100.0),
+                Style::new().fg(c.text.color()),
+            ))
+            .render(area, buf);
+    }
+
+    /// Apps built with ratatui, the highlight moving down them.
+    fn table(&self, buf: &mut Buffer, area: Rect, t: f32) {
+        let c = &self.colors;
+        let selected = num::floor_usize(t / 1.5)
+            .checked_rem(APPS.len())
+            .unwrap_or(0);
+        let rows = APPS.iter().map(|&(name, what)| Row::new([name, what]));
+        let table = Table::new(rows, [Constraint::Length(7), Constraint::Fill(1)])
+            .block(self.block("Table · built with ratatui"))
+            .column_spacing(2)
+            .row_highlight_style(
+                Style::new()
+                    .bg(c.palette.sample(0.4).lerp(c.panel, 0.55).color())
+                    .fg(Rgb::WHITE.color()),
+            )
+            .highlight_symbol("▶ ");
+        let mut state = TableState::default().with_selected(Some(selected));
+        StatefulWidget::render(table, area, buf, &mut state);
     }
 
     /// Two signals scrolling past.
@@ -553,6 +631,11 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 
 fn smooth(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
+}
+
+/// A steady pseudo-random value in `-0.5..0.5` for `k`.
+fn jitter(k: f32) -> f32 {
+    ((k * 12.9898).sin() * 43_758.547).fract() - 0.5
 }
 
 #[cfg(test)]

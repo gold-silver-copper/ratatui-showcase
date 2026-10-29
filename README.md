@@ -98,8 +98,9 @@ After each scene a card holds for at least 10 seconds, drawn with ratatui's
 own widgets in the colours of the scene before it, calm enough to read from
 the back of a room: "ratatui" in the classic 8x8 font, one fact about it
 typed out, and a dashboard of built-in widgets with live data, each box
-titled with the widget's name. A world map draws itself on a `Canvas` before
-routes fly between cities, beside a scrolling `Chart`, a `BarChart` and a
+titled with the widget's name: a world map that draws itself on a `Canvas`
+before routes fly between cities, a scrolling `Chart` and `Sparkline`, a
+`BarChart`, a `Table` of apps built with ratatui, a `LineGauge`, and a
 `Gauge` counting down to the next scene.
 
 ## How scenes are chosen
