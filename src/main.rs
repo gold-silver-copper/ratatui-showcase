@@ -3,12 +3,10 @@
 
 mod art;
 mod backdrop;
-mod card;
 mod diff;
 mod director;
 mod fonts;
 mod fx;
-mod gallery;
 mod glyph_table;
 mod glyphs;
 mod gpu;
@@ -18,10 +16,12 @@ mod params;
 mod profile;
 mod screen;
 mod shader;
+mod showcase;
 mod stage;
 mod tempo;
 mod theme;
 mod transition;
+mod widgets;
 mod zoom;
 
 use std::io::Write;
@@ -42,11 +42,10 @@ use ratatui::crossterm::terminal;
 use tachyonfx::EffectManager;
 
 use crate::backdrop::{BACKDROPS, Backdrop};
-use crate::card::Card;
 use crate::director::{Director, Pin};
 use crate::fonts::SystemFonts;
-use crate::gallery::Gallery;
 use crate::glyphs::{GlyphSet, Glyphs};
+use crate::showcase::Showcase;
 use crate::stage::{Act, IDLES, Idle, Look, Mode, Post, Stage};
 use crate::tempo::Tempo;
 use crate::theme::{Palette, SHADERS, Shader};
@@ -151,7 +150,7 @@ fn main() -> ExitCode {
         }
     };
     diff::warm();
-    gallery::warm();
+    showcase::warm();
     let exit = App::new()
         .add_plugins((
             DefaultPlugins
@@ -222,73 +221,23 @@ enum Phase {
     Leaving,
 }
 
-/// Scenes between two interludes.
-const SCENES_PER_CARD: usize = 1;
+/// Scenes between two showcases.
+const SCENES_PER_SHOWCASE: usize = 1;
 
-/// What shows: GPU scenes, or one of the interludes between them.
+/// What shows: GPU scenes, or the showcase of widgets between them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Scene,
-    Card,
-    Gallery,
+    Showcase,
 }
 
 impl Kind {
-    const ALL: [Kind; 3] = [Kind::Scene, Kind::Card, Kind::Gallery];
-
-    /// The kind `by` places on, wrapping round.
+    /// The other kind, `by` times over.
     fn step(self, by: isize) -> Kind {
-        let len = Kind::ALL.len().cast_signed();
-        let at = Kind::ALL.iter().position(|&k| k == self).unwrap_or(0);
-        let next = at
-            .cast_signed()
-            .saturating_add(by)
-            .rem_euclid(len.max(1))
-            .cast_unsigned();
-        Kind::ALL.get(next).copied().unwrap_or(Kind::Scene)
-    }
-}
-
-/// What plays between scenes, in turns: the card about ratatui, and
-/// libraries from its community.
-enum Interlude {
-    Card(Card),
-    Gallery(Box<Gallery>),
-}
-
-impl Interlude {
-    fn kind(&self) -> Kind {
-        match self {
-            Interlude::Card(_) => Kind::Card,
-            Interlude::Gallery(_) => Kind::Gallery,
-        }
-    }
-
-    fn hold(&self) -> f64 {
-        match self {
-            Interlude::Card(card) => card.hold,
-            Interlude::Gallery(gallery) => gallery.hold,
-        }
-    }
-
-    fn background(&self) -> theme::Rgb {
-        match self {
-            Interlude::Card(card) => card.background(),
-            Interlude::Gallery(gallery) => gallery.background(),
-        }
-    }
-
-    fn name(&self) -> &'static str {
-        match self {
-            Interlude::Card(_) => "about ratatui",
-            Interlude::Gallery(_) => "community widgets",
-        }
-    }
-
-    fn draw(&mut self, buf: &mut ratatui::buffer::Buffer, now: f64, dt: f32, beat: f32) {
-        match self {
-            Interlude::Card(card) => card.draw(buf, now),
-            Interlude::Gallery(gallery) => gallery.draw(buf, now, dt, beat),
+        match (self, by.rem_euclid(2) == 0) {
+            (kind, true) => kind,
+            (Kind::Scene, false) => Kind::Showcase,
+            (Kind::Showcase, false) => Kind::Scene,
         }
     }
 }
@@ -311,19 +260,17 @@ struct Show {
     hold_until: f64,
     caption: bool,
     skip: bool,
-    /// A switch asked for with the arrow keys: places along `Kind::ALL`.
+    /// A switch asked for with the arrow keys: how many times over.
     jump: isize,
     /// Since when the show is paused, and for how long it was paused
     /// before, in seconds since launch: its clock runs that much behind.
     paused: Option<f64>,
     stopped: f64,
-    /// The interlude on screen, and the one that comes once what shows
-    /// has left.
-    interlude: Option<Interlude>,
-    due: Option<Kind>,
-    /// Cards and gallery visits so far, and scenes since the last
-    /// interlude.
-    cards: usize,
+    /// The showcase on screen, and whether it comes once what shows has
+    /// left.
+    showcase: Option<Box<Showcase>>,
+    due: bool,
+    /// Showcases so far, and scenes since the last one.
     visits: usize,
     scenes: usize,
     /// The next scene, laid out in the background while this one holds.
@@ -358,9 +305,8 @@ impl Show {
             jump: 0,
             paused: None,
             stopped: 0.0,
-            interlude: None,
-            due: None,
-            cards: 0,
+            showcase: None,
+            due: false,
             visits: 0,
             scenes: 0,
             next: None,
@@ -372,7 +318,7 @@ impl Show {
     /// The scene starts holding at `now`, until the first bar line a hold
     /// later.
     fn hold_from(&mut self, now: f64) {
-        let hold = self.interlude.as_ref().map_or(self.hold, Interlude::hold);
+        let hold = self.showcase.as_ref().map_or(self.hold, |s| s.hold);
         self.phase = Phase::Holding;
         self.prepare_at = now + hold * 0.2;
         self.hold_until = self.tempo.next_bar(now + hold);
@@ -384,34 +330,16 @@ impl Show {
         };
     }
 
-    /// The interlude that comes next on its own: the card and the gallery
-    /// take turns.
-    fn next_interlude(&self) -> Kind {
-        if self.cards > self.visits {
-            Kind::Gallery
-        } else {
-            Kind::Card
-        }
-    }
-
-    /// A new interlude of `kind`; a card takes the colours of the scene
-    /// before it.
-    fn new_interlude(&mut self, kind: Kind, now: f64) -> Interlude {
+    /// A new showcase, in the colours of the scene before it.
+    fn new_showcase(&mut self, now: f64) -> Box<Showcase> {
         let act = self.stage.as_ref().map_or(&self.act, |stage| &stage.act);
-        if kind == Kind::Gallery {
-            let each = self.hold.max(gallery::SHOW);
-            let hold = self
-                .tempo
-                .bars(each * f64::from(num::u32_of(gallery::PER_VISIT)));
-            let gallery = Gallery::new(self.visits, act.theme(), now, hold);
-            self.visits = self.visits.saturating_add(1);
-            Interlude::Gallery(Box::new(gallery))
-        } else {
-            let hold = self.tempo.bars(self.hold.max(card::HOLD));
-            let card = Card::new(self.cards, act.theme(), now, hold);
-            self.cards = self.cards.saturating_add(1);
-            Interlude::Card(card)
-        }
+        let each = self.hold.max(showcase::SHOW);
+        let hold = self
+            .tempo
+            .bars(each * f64::from(num::u32_of(showcase::LIBRARIES)));
+        let showcase = Showcase::new(self.visits, act.theme(), now, hold);
+        self.visits = self.visits.saturating_add(1);
+        Box::new(showcase)
     }
 
     /// Starts laying out the scene after `current` on another thread.
@@ -584,12 +512,12 @@ fn frame(
             // A half-finished transition would play on the old layout: settle it.
             if let Some(pending) = show.pending.take() {
                 show.act = pending.act;
-                show.interlude = None;
+                show.showcase = None;
             } else {
                 show.act = act;
             }
-            if let Some(kind) = show.due.take() {
-                show.interlude = Some(show.new_interlude(kind, now));
+            if std::mem::take(&mut show.due) {
+                show.showcase = Some(show.new_showcase(now));
             }
             effects.transition.cancel_unique_effect(());
             effects.accent.cancel_unique_effect(());
@@ -622,7 +550,7 @@ fn frame(
                 }
                 if now >= show.accent_at {
                     show.accent_at = f64::MAX;
-                    if show.interlude.is_none()
+                    if show.showcase.is_none()
                         && let Some(stage) = &show.stage
                         && let Some(accent) = fx::accent(stage, area)
                     {
@@ -630,26 +558,27 @@ fn frame(
                     }
                 }
                 let jump = std::mem::take(&mut show.jump);
-                let showing = show.interlude.as_ref().map_or(Kind::Scene, Interlude::kind);
-                // In the gallery, skipping goes to its next library first.
+                let showing = if show.showcase.is_some() {
+                    Kind::Showcase
+                } else {
+                    Kind::Scene
+                };
+                // In the showcase, skipping goes to its next library first.
                 let skip = skip
-                    && match &mut show.interlude {
-                        Some(Interlude::Gallery(gallery)) => match gallery.next(now) {
-                            Some(skipped) => {
-                                show.hold_until -= skipped;
-                                false
-                            }
-                            None => true,
-                        },
-                        _ => true,
+                    && match show.showcase.as_mut().and_then(|s| s.next(now)) {
+                        Some(skipped) => {
+                            show.hold_until -= skipped;
+                            false
+                        }
+                        None => true,
                     };
                 let to = if jump != 0 {
                     Some(showing.step(jump))
                 } else if skip || now >= show.hold_until {
                     Some(if showing == Kind::Scene {
                         show.scenes = show.scenes.saturating_add(1);
-                        if show.scenes >= SCENES_PER_CARD {
-                            show.next_interlude()
+                        if show.scenes >= SCENES_PER_SHOWCASE {
+                            Kind::Showcase
                         } else {
                             Kind::Scene
                         }
@@ -659,17 +588,17 @@ fn frame(
                 } else {
                     None
                 };
-                match to {
-                    None => {}
-                    Some(Kind::Scene) if showing == Kind::Scene => {
+                match (showing, to) {
+                    (_, None) => {}
+                    (Kind::Scene, Some(Kind::Scene)) => {
                         effects.accent.cancel_unique_effect(());
                         change(show, effects, &fonts, area, now);
                     }
-                    Some(Kind::Scene) => {
-                        if let Some(interlude) = &show.interlude {
+                    (Kind::Showcase, Some(Kind::Scene)) => {
+                        if let Some(showcase) = &show.showcase {
                             effects
                                 .transition
-                                .add_unique_effect((), fx::card_leave(interlude.background()));
+                                .add_unique_effect((), fx::showcase_leave(showcase.background()));
                         }
                         if let Some(stage) = &show.stage {
                             let act = stage.act.clone();
@@ -678,12 +607,12 @@ fn frame(
                         }
                         show.phase = Phase::Leaving;
                     }
-                    Some(kind) => {
+                    (_, Some(Kind::Showcase)) => {
                         effects.accent.cancel_unique_effect(());
-                        match &show.interlude {
-                            Some(interlude) => effects
+                        match &show.showcase {
+                            Some(showcase) => effects
                                 .transition
-                                .add_unique_effect((), fx::card_leave(interlude.background())),
+                                .add_unique_effect((), fx::showcase_leave(showcase.background())),
                             None => {
                                 if let Some(stage) = &show.stage {
                                     effects
@@ -693,7 +622,7 @@ fn frame(
                             }
                         }
                         show.scenes = 0;
-                        show.due = Some(kind);
+                        show.due = true;
                         show.phase = Phase::Leaving;
                     }
                 }
@@ -708,14 +637,14 @@ fn frame(
                 }
             }
             Phase::Leaving if !effects.transition.is_running() => {
-                if let Some(kind) = show.due.take() {
-                    let interlude = show.new_interlude(kind, now);
+                if std::mem::take(&mut show.due) {
+                    let showcase = show.new_showcase(now);
                     effects
                         .transition
-                        .add_unique_effect((), fx::card_enter(interlude.background(), area));
-                    show.interlude = Some(interlude);
+                        .add_unique_effect((), fx::showcase_enter(showcase.background(), area));
+                    show.showcase = Some(showcase);
                 } else if let Some(stage) = show.pending.take() {
-                    show.interlude = None;
+                    show.showcase = None;
                     // The old scene is gone: a good moment for the clock to
                     // start over unseen.
                     show.rebase(now, 600.0);
@@ -730,9 +659,9 @@ fn frame(
         }
 
         let Some(stage) = &show.stage else { return };
-        if let Some(interlude) = &mut show.interlude {
+        if let Some(showcase) = &mut show.showcase {
             gpu.idle();
-            interlude.draw(buffer, now, dt.as_secs_f32(), show.tempo.phase(now));
+            showcase.draw(buffer, now, dt.as_secs_f32(), show.tempo.phase(now));
         } else {
             let frame_info = gpu::Frame {
                 t: num::narrow(now - show.epoch),
@@ -761,8 +690,8 @@ fn frame(
                 area.width,
                 area.height
             );
-            if let Some(interlude) = &show.interlude {
-                caption += &format!("  ·  {}", interlude.name());
+            if show.showcase.is_some() {
+                caption += "  ·  showcase";
             } else {
                 caption += &format!(
                     "  ·  {}  ·  {}  ·  {}",
@@ -819,7 +748,7 @@ fn flicker(data: &[u32], (last, before): &mut Frames) -> (usize, usize) {
 
 /// `text` wrapped and centred on an otherwise blank screen.
 fn notice(buf: &mut ratatui::buffer::Buffer, text: &str) {
-    let lines = card::wrap(text, usize::from(buf.area.width.saturating_sub(4)));
+    let lines = widgets::wrap(text, usize::from(buf.area.width.saturating_sub(4)));
     let top = buf.area.height.saturating_sub(num::u16_of(lines.len())) / 2;
     for (y, line) in (top..).zip(&lines) {
         let x = buf

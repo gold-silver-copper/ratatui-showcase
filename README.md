@@ -17,8 +17,8 @@ cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 
 | Key | Action |
 | --- | --- |
-| `Space`, `Enter` | Next scene, or the next library among the community widgets |
-| `→`, `←` | Switch to the next or previous kind: scenes, the card about ratatui, community widgets |
+| `Space`, `Enter` | Next scene, or the next library in the showcase |
+| `→`, `←` | Switch between the shader scenes and the showcase |
 | `t` | Next colour theme |
 | `s` | Next shader |
 | `b` | Next background |
@@ -96,23 +96,19 @@ cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 
 ## Between scenes
 
-After each scene comes an interlude, at least 10 seconds long, drawn in flat
-surfaces, without borders, in the colours of the scene before it. Two take
-turns:
+The show takes turns between two things: a fullscreen shader scene, and the
+showcase of widgets, drawn in flat surfaces, without borders, in the
+colours of the scene before it. Under a bar that stays (ratatui's own
+`RatatuiMascot`, "ratatui" in the 8x8 font, and every library, the one
+showing lit), the libraries take turns, each filling the screen beside a
+panel on what it is, how to add it and how it's drawn:
 
-- **A card about ratatui,** calm enough to read from the back of a room:
-  "ratatui" in the classic 8x8 font, one fact about it typed out, and a
-  dashboard of built-in widgets with live data, each titled with the
-  widget's name: a world map that draws itself on a `Canvas` before routes
-  fly between cities, a scrolling `Chart` and `Sparkline`, a `BarChart`, a
-  `Table` of apps built with ratatui, a `LineGauge`, and a `Gauge` counting
-  down to the next scene.
-- **Community widgets:** under a bar that stays (ratatui's own
-  `RatatuiMascot`, "ratatui" in the 8x8 font and the libraries of the
-  visit), libraries from
-  [awesome-ratatui](https://github.com/ratatui/awesome-ratatui) take turns,
-  three a visit, each filling the screen beside a panel on what it is, how
-  to add it and how it's drawn:
+- **ratatui's own widgets,** beside a fact about ratatui: a world map that
+  draws itself on a `Canvas` before routes fly between cities, a scrolling
+  `Chart` and `Sparkline`, a `BarChart`, a `Table` of apps built with
+  ratatui, a `LineGauge`, and a `Gauge` counting down to the next library.
+- **Libraries from its community,** from
+  [awesome-ratatui](https://github.com/ratatui/awesome-ratatui):
   [tui-globe](https://github.com/d10n/tui-globe) turning with cities marked;
   [edtui](https://github.com/preiter93/edtui) typing out a ratatui hello
   world, then what it draws;

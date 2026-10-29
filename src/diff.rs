@@ -1,4 +1,4 @@
-//! Ratatui's own source scrolling past as a diff, one of the gallery's
+//! Ratatui's own source scrolling past as a diff, one of the showcase's
 //! libraries: every change to its source from 0.28.1 to 0.29.0, in
 //! ratatui-diff's widget with Rust syntax colours, side by side when
 //! there's room.

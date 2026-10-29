@@ -1,9 +1,8 @@
-//! Widgets from ratatui's community, one at a time, under a bar that stays:
-//! the rat, "ratatui" in the 8x8 font with a line about it, and the
-//! libraries of the visit. Each library fills the screen beside a panel on
-//! what it is and how it's used. Flat surfaces, no borders. Each visit
-//! shows a few of them, a while each, and the next carries on where it
-//! left off.
+//! The showcase: ratatui's own widgets, then libraries from its community,
+//! one at a time, under a bar that stays: the rat, "ratatui" in the 8x8
+//! font with a line about it, and every library, the one showing lit. Each
+//! fills the screen beside a panel on what it is and how it's used. Flat
+//! surfaces, no borders.
 
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
@@ -31,18 +30,19 @@ use tui_globe::{CONTOUR_COLOR, Camera, Globe, LAND_COLOR, MapData};
 use tui_qrcode::{Colors as QrColors, QrCodeWidget, QuietZone, Scaling};
 
 use crate::art;
-use crate::card::{self, Colors};
 use crate::diff::DiffView;
 use crate::num;
 use crate::theme::{Palette, Rgb};
+use crate::widgets::{self, Colors};
 
-/// Libraries a visit shows.
-pub const PER_VISIT: usize = 3;
+/// How many libraries it shows.
+pub const LIBRARIES: usize = EXHIBITS.len();
 /// The shortest a library shows, in seconds.
 pub const SHOW: f64 = 8.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Exhibit {
+    Widgets,
     Globe,
     Code,
     Diff,
@@ -52,7 +52,8 @@ enum Exhibit {
     Wireframe,
 }
 
-const EXHIBITS: [Exhibit; 7] = [
+const EXHIBITS: [Exhibit; 8] = [
+    Exhibit::Widgets,
     Exhibit::Globe,
     Exhibit::Code,
     Exhibit::Diff,
@@ -63,9 +64,10 @@ const EXHIBITS: [Exhibit; 7] = [
 ];
 
 impl Exhibit {
-    /// What it is and does, for the side panel.
-    fn about(self) -> &'static str {
+    /// What it is and does, for the side panel on the `visit`th visit.
+    fn about(self, visit: usize) -> &'static str {
         match self {
+            Exhibit::Widgets => widgets::fact(visit),
             Exhibit::Globe => {
                 "A 3D globe drawn in braille dots, eight to a cell. A camera turns it, \
                  and project_point pins anything to it: here, nine cities."
@@ -100,6 +102,10 @@ impl Exhibit {
     /// How an app draws it.
     fn usage(self) -> &'static str {
         match self {
+            Exhibit::Widgets => {
+                "let gauge = Gauge::default()\n    .block(Block::new().title(\"Gauge\"))\n    \
+                 .ratio(0.42);\nframe.render_widget(gauge, area);"
+            }
             Exhibit::Globe => {
                 "let camera = Camera {\n    yaw: t * 0.35,\n    pitch: 0.35,\n    zoom: 1.4,\n};\n\
                  let globe = Globe::new(&map, camera);\nframe.render_widget(globe, area);"
@@ -135,6 +141,7 @@ impl Exhibit {
     /// The crate and what it is.
     fn label(self) -> (&'static str, &'static str) {
         match self {
+            Exhibit::Widgets => ("ratatui", "the widgets it comes with"),
             Exhibit::Globe => ("tui-globe", "a 3D globe in braille"),
             Exhibit::Code => ("edtui", "a vim-like code editor"),
             Exhibit::Diff => ("ratatui-diff", "diffs, side by side"),
@@ -234,10 +241,10 @@ pub fn warm() {
     std::thread::spawn(map);
 }
 
-pub struct Gallery {
+pub struct Showcase {
     colors: Colors,
-    /// The first exhibit of this visit.
-    first: usize,
+    /// Which visit this is.
+    visit: usize,
     started: f64,
     /// How long it holds, in seconds.
     pub hold: f64,
@@ -255,12 +262,12 @@ pub struct Gallery {
     skipped: f32,
 }
 
-impl Gallery {
+impl Showcase {
     /// The `n`th visit.
     pub fn new(n: usize, palette: &Palette, now: f64, hold: f64) -> Self {
         Self {
             colors: Colors::new(palette),
-            first: n.saturating_mul(PER_VISIT),
+            visit: n,
             started: now,
             hold,
             showing: None,
@@ -276,7 +283,7 @@ impl Gallery {
         self.colors.bg
     }
 
-    /// Draws the gallery at `now`, `dt` seconds after the last frame, with
+    /// Draws the showcase at `now`, `dt` seconds after the last frame, with
     /// `beat` the show's beats.
     pub fn draw(&mut self, buf: &mut Buffer, now: f64, dt: f32, beat: f32) {
         let t = num::narrow(now - self.started) + self.skipped;
@@ -297,8 +304,8 @@ impl Gallery {
             .spacing(1)
             .areas(area);
 
-        let each = num::narrow(self.hold) / num::float(PER_VISIT);
-        let step = num::floor_usize(t / each.max(1.0)).min(PER_VISIT.saturating_sub(1));
+        let each = num::narrow(self.hold) / num::float(EXHIBITS.len());
+        let step = num::floor_usize(t / each.max(1.0)).min(EXHIBITS.len().saturating_sub(1));
         let Some(exhibit) = self.exhibit(step) else {
             return;
         };
@@ -314,16 +321,23 @@ impl Gallery {
         } else {
             [body, Rect::ZERO]
         };
-        Block::new().style(self.colors.surface()).render(main, buf);
+        // ratatui's own widgets are surfaces of their own.
+        if exhibit != Exhibit::Widgets {
+            Block::new().style(self.colors.surface()).render(main, buf);
+        }
         let rest = self.side(buf, side, exhibit);
         let view = main.inner(Margin::new(2, 1));
         match exhibit {
+            Exhibit::Widgets => {
+                let progress = f64::from(local / each.max(1.0));
+                widgets::dashboard(&self.colors, buf, main, local, progress.clamp(0.0, 1.0));
+            }
             Exhibit::Globe => self.globe(buf, view, local),
             Exhibit::Code => self.code(buf, view, rest, local, each),
             Exhibit::Diff => {
-                let first = self.first;
+                let visit = self.visit;
                 self.diff
-                    .get_or_insert_with(|| DiffView::new(first, now))
+                    .get_or_insert_with(|| DiffView::new(visit, now))
                     .draw(buf, main, now, dt);
             }
             Exhibit::Qr => self.qr(buf, view),
@@ -353,14 +367,14 @@ impl Gallery {
         }
     }
 
-    /// Skips to the next library of this visit, if there is one: how many
+    /// Skips to the next library, if there is one: how many
     /// seconds it skipped.
     pub fn next(&mut self, now: f64) -> Option<f64> {
         let t = num::narrow(now - self.started) + self.skipped;
-        let each = num::narrow(self.hold) / num::float(PER_VISIT);
+        let each = num::narrow(self.hold) / num::float(EXHIBITS.len());
         let step = num::floor_usize(t / each.max(1.0));
         let next = step.saturating_add(1);
-        if next >= PER_VISIT {
+        if next >= EXHIBITS.len() {
             return None;
         }
         let jump = each * num::float(next) - t;
@@ -368,18 +382,14 @@ impl Gallery {
         Some(f64::from(jump))
     }
 
-    /// The `step`th library of this visit.
+    /// The `step`th library.
     fn exhibit(&self, step: usize) -> Option<Exhibit> {
-        let index = self
-            .first
-            .saturating_add(step)
-            .checked_rem(EXHIBITS.len())?;
-        EXHIBITS.get(index).copied()
+        EXHIBITS.get(step).copied()
     }
 
     /// A bar across the top: the rat, "ratatui" in the 8x8 font over a line
-    /// about it, and the libraries of this visit, the one showing lit. Each
-    /// is left out when there's no room.
+    /// about it, and the libraries, the one showing lit. Each is
+    /// left out when there's no room.
     fn header(&self, buf: &mut Buffer, area: Rect, step: usize) {
         let c = &self.colors;
         Block::new().style(c.surface()).render(area, buf);
@@ -404,7 +414,7 @@ impl Gallery {
 
         // The largest word that fits over the blurb.
         let word = art::pixel_font("ratatui");
-        let blurb = "Terminal user interfaces in Rust · widgets from its community";
+        let blurb = "Terminal user interfaces in Rust · its widgets, and its community's";
         let rows = usize::from(middle.height);
         let scale = (1..=4).rev().find(|&s: &usize| {
             s.saturating_mul(4).saturating_add(2) <= rows
@@ -421,7 +431,7 @@ impl Gallery {
                     .x
                     .saturating_add(middle.width.saturating_sub(word_w) / 2);
                 let width = word.width.max(1);
-                card::pixels(
+                widgets::pixels(
                     buf,
                     x,
                     usize::from(top).saturating_mul(2),
@@ -453,34 +463,33 @@ impl Gallery {
                 buf,
             );
 
-        // The visit's libraries, the one showing on the accent.
+        // Every library, a row each on a raised surface, the one showing on
+        // the accent; when they don't all fit, the rows around it.
         if rail_w > 0 {
-            let slots = Layout::vertical([Constraint::Fill(1); PER_VISIT])
-                .spacing(1)
-                .split(rail.inner(Margin::new(2, 1)));
-            for (i, slot) in slots.iter().enumerate() {
+            let inner = rail.inner(Margin::new(2, 1));
+            let shown = inner.height.min(num::u16_of(EXHIBITS.len()));
+            let list = inner.centered_vertically(Constraint::Length(shown));
+            Block::new()
+                .style(Style::new().bg(c.raised.color()))
+                .render(list, buf);
+            let from = step.saturating_add(1).saturating_sub(usize::from(shown));
+            for (row, i) in (list.top()..list.bottom()).zip(from..) {
                 let Some(exhibit) = self.exhibit(i) else {
-                    continue;
+                    break;
                 };
-                let (name, what) = exhibit.label();
-                let lit = i == step;
-                let (fill, fg, sub) = if lit {
-                    (c.accent, c.bg, c.bg.lerp(c.accent, 0.3))
+                let (fill, fg) = if i == step {
+                    (c.accent, c.bg)
                 } else {
-                    (c.raised, c.text, c.dim)
+                    (c.raised, c.dim)
                 };
-                let lines = vec![
-                    Line::styled(
-                        name,
-                        Style::new().fg(fg.color()).add_modifier(Modifier::BOLD),
-                    ),
-                    Line::styled(what, Style::new().fg(sub.color())),
-                ];
-                let pad = slot.height.saturating_sub(2) / 2;
-                Paragraph::new(lines)
-                    .style(Style::new().bg(fill.color()))
-                    .block(Block::new().padding(Padding::new(2, 1, pad, 0)))
-                    .render(*slot, buf);
+                Line::styled(
+                    format!("  {}", exhibit.label().0),
+                    Style::new()
+                        .fg(fg.color())
+                        .bg(fill.color())
+                        .add_modifier(Modifier::BOLD),
+                )
+                .render(Rect::new(list.x, row, list.width, 1), buf);
             }
         }
     }
@@ -495,7 +504,7 @@ impl Gallery {
         Block::new().style(c.surface()).render(area, buf);
         let inner = area.inner(Margin::new(2, 1));
         let (name, what) = exhibit.label();
-        let about = card::wrap(exhibit.about(), usize::from(inner.width));
+        let about = widgets::wrap(exhibit.about(self.visit), usize::from(inner.width));
         let mut lines = vec![
             Line::styled(
                 name,
@@ -701,7 +710,7 @@ impl Gallery {
             .y
             .saturating_add(area.height.saturating_sub(word_rows.saturating_add(3)) / 2);
         let width = word.width.max(1);
-        card::pixels(
+        widgets::pixels(
             buf,
             x,
             usize::from(y).saturating_mul(2),
@@ -950,12 +959,12 @@ mod tests {
 
     #[test]
     fn every_exhibit_draws_at_any_size() {
-        for n in 0..3 {
-            let mut gallery = Gallery::new(n, &Palette::first(), 0.0, 24.0);
+        for n in 0..2 {
+            let mut showcase = Showcase::new(n, &Palette::first(), 0.0, 64.0);
             for (w, h) in [(1, 1), (12, 4), (40, 12), (80, 24), (300, 90)] {
-                for t in [0.0, 3.0, 7.9, 8.5, 12.0, 16.5, 20.0, 23.9] {
+                for t in (0..32).map(|i| f64::from(i) * 2.0 + 0.5) {
                     let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
-                    gallery.draw(&mut buf, t, 0.016, num::narrow(t * 2.0));
+                    showcase.draw(&mut buf, t, 0.016, num::narrow(t * 2.0));
                 }
             }
         }
