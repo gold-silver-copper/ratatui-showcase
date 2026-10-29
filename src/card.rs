@@ -521,7 +521,7 @@ impl Colors {
                     .fg(self.accent.color())
                     .add_modifier(Modifier::BOLD),
             ))
-            .padding(Padding::horizontal(2))
+            .padding(Padding::new(2, 2, 0, 1))
             .style(self.surface())
     }
 
