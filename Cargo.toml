@@ -11,13 +11,20 @@ ab_glyph = "0.2.32"
 bevy = { version = "0.20.0", default-features = false, features = ["async_executor", "bevy_asset", "bevy_image", "bevy_render", "bevy_shader", "bevy_window", "multi_threaded", "std"] }
 bevy_ratatui = "0.13.0"
 bytemuck = "1.25.2"
+edtui = { version = "0.11.7", default-features = false, features = ["syntax-highlighting"] }
 fastrand = "2.5.0"
 font8x8 = "0.3.1"
 fontdb = "0.24.0"
 naga = { version = "30.0.1", features = ["wgsl-in", "spv-out"] }
+qrcode = { version = "0.14", default-features = false }
 ratatui = "0.30.2"
 ratatui-diff = { git = "https://github.com/joshka/ratatui-diff", rev = "574bfb620389e7f440be5b19018c0a594595f58a", version = "0.1.0", features = ["syntax"] }
+ratatui-markdown = { git = "https://github.com/celestia-island/ratatui-markdown", rev = "cb26a62f7d8e0ff776c28a1a35718cb8171aca57", version = "0.3.6", default-features = false, features = ["markdown", "mermaid"] }
+ratatui-wireframe = "0.7.0"
 tachyonfx = { version = "0.25.2", features = ["sendable"] }
+tui-equalizer = "0.2.4"
+tui-globe = "1.0.0"
+tui-qrcode = "0.2.7"
 wgpu = { version = "30.0.1", default-features = false }
 
 [profile.dev]

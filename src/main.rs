@@ -8,6 +8,7 @@ mod diff;
 mod director;
 mod fonts;
 mod fx;
+mod gallery;
 mod glyph_table;
 mod glyphs;
 mod gpu;
@@ -45,6 +46,7 @@ use crate::card::Card;
 use crate::diff::DiffView;
 use crate::director::{Director, Pin};
 use crate::fonts::SystemFonts;
+use crate::gallery::Gallery;
 use crate::glyphs::{GlyphSet, Glyphs};
 use crate::stage::{Act, IDLES, Idle, Look, Mode, Post, Stage};
 use crate::tempo::Tempo;
@@ -150,6 +152,7 @@ fn main() -> ExitCode {
         }
     };
     diff::warm();
+    gallery::warm();
     let exit = App::new()
         .add_plugins((
             DefaultPlugins
@@ -223,10 +226,11 @@ enum Phase {
 /// Scenes between two interludes.
 const SCENES_PER_CARD: usize = 1;
 
-/// What plays between scenes: the card about ratatui and the diff of its
-/// source take turns.
+/// What plays between scenes, in turns: the card about ratatui, widgets
+/// from its community, and the diff of its source.
 enum Interlude {
     Card(Card),
+    Gallery(Box<Gallery>),
     Diff(Box<DiffView>),
 }
 
@@ -234,6 +238,7 @@ impl Interlude {
     fn hold(&self) -> f64 {
         match self {
             Interlude::Card(card) => card.hold,
+            Interlude::Gallery(gallery) => gallery.hold,
             Interlude::Diff(diff) => diff.hold,
         }
     }
@@ -241,6 +246,7 @@ impl Interlude {
     fn background(&self) -> theme::Rgb {
         match self {
             Interlude::Card(card) => card.background(),
+            Interlude::Gallery(gallery) => gallery.background(),
             Interlude::Diff(_) => DiffView::background(),
         }
     }
@@ -248,13 +254,15 @@ impl Interlude {
     fn name(&self) -> &'static str {
         match self {
             Interlude::Card(_) => "about ratatui",
+            Interlude::Gallery(_) => "community widgets",
             Interlude::Diff(_) => "ratatui 0.28 → 0.29 in ratatui-diff",
         }
     }
 
-    fn draw(&mut self, buf: &mut ratatui::buffer::Buffer, now: f64, dt: f32) {
+    fn draw(&mut self, buf: &mut ratatui::buffer::Buffer, now: f64, dt: f32, beat: f32) {
         match self {
             Interlude::Card(card) => card.draw(buf, now),
+            Interlude::Gallery(gallery) => gallery.draw(buf, now, dt, beat),
             Interlude::Diff(diff) => diff.draw(buf, now, dt),
         }
     }
@@ -343,14 +351,24 @@ impl Show {
     fn new_interlude(&mut self, now: f64) -> Interlude {
         let n = self.interludes;
         self.interludes = n.saturating_add(1);
-        let turn = n.checked_div(2).unwrap_or(0);
-        if n.is_multiple_of(2) {
-            let act = self.stage.as_ref().map_or(&self.act, |stage| &stage.act);
-            let hold = self.tempo.bars(self.hold.max(card::HOLD));
-            Interlude::Card(Card::new(turn, act.theme(), now, hold))
-        } else {
-            let hold = self.tempo.bars(self.hold.max(diff::HOLD));
-            Interlude::Diff(Box::new(DiffView::new(turn, now, hold)))
+        let turn = n.checked_div(3).unwrap_or(0);
+        let act = self.stage.as_ref().map_or(&self.act, |stage| &stage.act);
+        match n.checked_rem(3) {
+            Some(0) => {
+                let hold = self.tempo.bars(self.hold.max(card::HOLD));
+                Interlude::Card(Card::new(turn, act.theme(), now, hold))
+            }
+            Some(1) => {
+                let each = self.hold.max(gallery::SHOW);
+                let hold = self
+                    .tempo
+                    .bars(each * f64::from(num::u32_of(gallery::PER_VISIT)));
+                Interlude::Gallery(Box::new(Gallery::new(turn, act.theme(), now, hold)))
+            }
+            _ => {
+                let hold = self.tempo.bars(self.hold.max(diff::HOLD));
+                Interlude::Diff(Box::new(DiffView::new(turn, now, hold)))
+            }
         }
     }
 
@@ -618,7 +636,7 @@ fn frame(
         let Some(stage) = &show.stage else { return };
         if let Some(interlude) = &mut show.interlude {
             gpu.idle();
-            interlude.draw(buffer, now, dt.as_secs_f32());
+            interlude.draw(buffer, now, dt.as_secs_f32(), show.tempo.phase(now));
         } else {
             let frame_info = gpu::Frame {
                 t: num::narrow(now - show.epoch),

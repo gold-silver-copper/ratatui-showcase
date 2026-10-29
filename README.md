@@ -94,7 +94,7 @@ cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 
 ## Between scenes
 
-After each scene comes an interlude, at least 10 seconds long. Two take
+After each scene comes an interlude, at least 10 seconds long. Three take
 turns:
 
 - **A card about ratatui,** drawn with its own widgets in the colours of the
@@ -105,6 +105,20 @@ turns:
   cities, a scrolling `Chart` and `Sparkline`, a `BarChart`, a `Table` of
   apps built with ratatui, a `LineGauge`, and a `Gauge` counting down to the
   next scene.
+- **Community widgets:** under a header that stays — ratatui's own
+  `RatatuiMascot`, "ratatui" in the 8x8 font and a line about it — libraries
+  from [awesome-ratatui](https://github.com/ratatui/awesome-ratatui) take
+  turns, three a visit, each sweeping in over the last:
+  [tui-globe](https://github.com/d10n/tui-globe) turning with cities marked,
+  [edtui](https://github.com/preiter93/edtui) typing out a ratatui hello world
+  before the window it makes appears,
+  [tui-qrcode](https://crates.io/crates/tui-qrcode) with a code for
+  ratatui.rs to scan from the screen,
+  [ratatui-markdown](https://github.com/celestia-island/ratatui-markdown)
+  scrolling through a page about ratatui with a table and a diagram,
+  [tui-equalizer](https://crates.io/crates/tui-equalizer) jumping on the beat,
+  and [ratatui-wireframe](https://crates.io/crates/ratatui-wireframe)
+  turning an icosahedron.
 - **ratatui's own source as a diff:** every change to it from 0.28.1 to
   0.29.0 scrolling past in [ratatui-diff](https://github.com/joshka/ratatui-diff),
   with Rust syntax colours, side by side when the terminal is at least 150
@@ -234,3 +248,9 @@ from foot's `box-drawing.c` (MIT) by `tools/gen_glyphs.py`.
 in the ratatui repository (MIT). The diff's syntax colours use the grammars
 and themes bundled with ratatui-diff (from syntect, two-face and bat); their
 notices are in `ratatui_diff::SyntaxHighlighter::acknowledgements()`.
+
+## License
+
+The source is MIT licensed (`LICENSE`). The program links
+[tui-globe](https://github.com/d10n/tui-globe), which is GPL-3.0-or-later, so
+a built binary is distributed under the GPL-3.0-or-later.

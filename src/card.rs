@@ -131,7 +131,7 @@ impl Card {
     pub fn draw(&self, buf: &mut Buffer, now: f64) {
         let t = num::narrow(now - self.started);
         let c = &self.colors;
-        self.backdrop(buf);
+        self.colors.backdrop(buf);
         // The bottom row is the caption's.
         let area = Rect {
             height: buf.area.height.saturating_sub(1),
@@ -243,40 +243,11 @@ impl Card {
         self.gauge(buf, gauge, progress);
     }
 
-    /// A still, faint glow of the theme's first colour from the top.
-    fn backdrop(&self, buf: &mut Buffer) {
-        let area = buf.area;
-        let tint = self.colors.palette.sample(0.0);
-        for y in area.top()..area.bottom() {
-            let fall = 1.0 - f32::from(y) / f32::from(area.height.max(1));
-            let color = self.colors.bg.lerp(tint, 0.07 * fall * fall);
-            buf.set_style(
-                Rect::new(area.x, y, area.width, 1),
-                Style::new().bg(color.color()),
-            );
-        }
-    }
-
-    /// A rounded box titled with a widget's name.
-    fn block<'a>(&self, title: &'a str) -> Block<'a> {
-        let c = &self.colors;
-        Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(c.border.color()))
-            .title(Line::styled(
-                format!(" {title} "),
-                Style::new()
-                    .fg(c.accent.color())
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .style(Style::new().bg(c.panel.color()).fg(c.text.color()))
-    }
-
     /// The world map draws itself from west to east, then routes fly
     /// between cities one after another.
     fn world(&self, buf: &mut Buffer, area: Rect, t: f32) {
         let c = &self.colors;
-        let block = self.block("Canvas");
+        let block = self.colors.block("Canvas");
         let inner = block.inner(area);
         let reveal = smooth(((t - 0.4) / DRAW).clamp(0.0, 1.0));
         let flying = t - 0.4 - DRAW;
@@ -332,7 +303,7 @@ impl Card {
 
     fn sparkline(&self, buf: &mut Buffer, area: Rect, t: f32) {
         let c = &self.colors;
-        let block = self.block("Sparkline");
+        let block = self.colors.block("Sparkline");
         let n = usize::from(block.inner(area).width);
         // A new value four times a second; the line scrolls left.
         let start = num::floor_usize(t * 4.0);
@@ -356,7 +327,7 @@ impl Card {
 
     fn bars(&self, buf: &mut Buffer, area: Rect, t: f32) {
         let c = &self.colors;
-        let block = self.block("BarChart");
+        let block = self.colors.block("BarChart");
         let inner = block.inner(area);
         let n: u16 = 8;
         let width = inner
@@ -398,7 +369,7 @@ impl Card {
     fn gauge(&self, buf: &mut Buffer, area: Rect, progress: f64) {
         let c = &self.colors;
         Gauge::default()
-            .block(self.block("Gauge"))
+            .block(self.colors.block("Gauge"))
             .gauge_style(
                 Style::new()
                     .fg(c.palette.sample(0.4).lerp(Rgb::WHITE, 0.1).color())
@@ -417,7 +388,7 @@ impl Card {
         let c = &self.colors;
         let ratio = 0.55 + 0.3 * (t * 0.45).sin() * (t * 0.17 + 0.6).cos();
         LineGauge::default()
-            .block(self.block("LineGauge"))
+            .block(self.colors.block("LineGauge"))
             .filled_style(Style::new().fg(c.palette.sample(0.7).lerp(Rgb::WHITE, 0.1).color()))
             .unfilled_style(Style::new().fg(c.border.color()))
             .ratio(f64::from(ratio).clamp(0.0, 1.0))
@@ -436,7 +407,7 @@ impl Card {
             .unwrap_or(0);
         let rows = APPS.iter().map(|&(name, what)| Row::new([name, what]));
         let table = Table::new(rows, [Constraint::Length(7), Constraint::Fill(1)])
-            .block(self.block("Table · built with ratatui"))
+            .block(self.colors.block("Table · built with ratatui"))
             .column_spacing(2)
             .row_highlight_style(
                 Style::new()
@@ -478,7 +449,7 @@ impl Card {
         ];
         let axis = Style::new().fg(c.dim.color());
         Chart::new(datasets)
-            .block(self.block("Chart"))
+            .block(self.colors.block("Chart"))
             .x_axis(
                 Axis::default()
                     .bounds([now - 10.0, now])
@@ -496,18 +467,18 @@ impl Card {
 }
 
 /// A card's colours, from the scene before it.
-struct Colors {
-    palette: Palette,
-    bg: Rgb,
-    panel: Rgb,
-    text: Rgb,
-    dim: Rgb,
-    border: Rgb,
-    accent: Rgb,
+pub struct Colors {
+    pub palette: Palette,
+    pub bg: Rgb,
+    pub panel: Rgb,
+    pub text: Rgb,
+    pub dim: Rgb,
+    pub border: Rgb,
+    pub accent: Rgb,
 }
 
 impl Colors {
-    fn new(palette: &Palette) -> Self {
+    pub fn new(palette: &Palette) -> Self {
         let bg = palette.background;
         let text = Rgb::WHITE.lerp(palette.accent, 0.08);
         Self {
@@ -519,6 +490,35 @@ impl Colors {
             accent: palette.accent.lerp(Rgb::WHITE, 0.2),
             palette: palette.clone(),
         }
+    }
+
+    /// A still, faint glow of the theme's first colour from the top.
+    pub fn backdrop(&self, buf: &mut Buffer) {
+        let area = buf.area;
+        let tint = self.palette.sample(0.0);
+        for y in area.top()..area.bottom() {
+            let fall = 1.0 - f32::from(y) / f32::from(area.height.max(1));
+            let color = self.bg.lerp(tint, 0.07 * fall * fall);
+            buf.set_style(
+                Rect::new(area.x, y, area.width, 1),
+                Style::new().bg(color.color()),
+            );
+        }
+    }
+
+    /// A rounded box titled with a widget's name.
+    pub fn block<'a>(&self, title: &'a str) -> Block<'a> {
+        let c = self;
+        Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(c.border.color()))
+            .title(Line::styled(
+                format!(" {title} "),
+                Style::new()
+                    .fg(c.accent.color())
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .style(Style::new().bg(c.panel.color()).fg(c.text.color()))
     }
 }
 
@@ -562,7 +562,7 @@ fn route(
 /// one above the other, so with cells twice as tall as wide they come out
 /// square. Each pixel is `scale` cells wide and `scale` half rows tall;
 /// `top` is in half rows. Pixels `at` gives no colour show what is below.
-fn pixels(
+pub fn pixels(
     buf: &mut Buffer,
     left: u16,
     top: usize,
