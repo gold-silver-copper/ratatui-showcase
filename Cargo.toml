@@ -19,7 +19,7 @@ naga = { version = "30.0.1", features = ["wgsl-in", "spv-out"] }
 qrcode = { version = "0.14", default-features = false }
 ratatui = "0.30.2"
 ratatui-diff = { git = "https://github.com/joshka/ratatui-diff", rev = "574bfb620389e7f440be5b19018c0a594595f58a", version = "0.1.0", features = ["syntax"] }
-ratatui-markdown = { git = "https://github.com/celestia-island/ratatui-markdown", rev = "cb26a62f7d8e0ff776c28a1a35718cb8171aca57", version = "0.3.6", default-features = false, features = ["markdown", "mermaid"] }
+ratatui-markdown = { git = "https://github.com/celestia-island/ratatui-markdown", rev = "cb26a62f7d8e0ff776c28a1a35718cb8171aca57", version = "0.3.6", default-features = false, features = ["markdown"] }
 ratatui-wireframe = "0.7.0"
 tachyonfx = { version = "0.25.2", features = ["sendable"] }
 tui-equalizer = "0.2.4"

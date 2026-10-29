@@ -1,12 +1,12 @@
-//! Ratatui's own source scrolling past as a diff: every change to its
-//! source from 0.28.1 to 0.29.0, in ratatui-diff's widget with Rust syntax
-//! colours, side by side when the terminal is wide enough.
+//! Ratatui's own source scrolling past as a diff, one of the gallery's
+//! libraries: every change to its source from 0.28.1 to 0.29.0, in
+//! ratatui-diff's widget with Rust syntax colours, side by side when
+//! there's room.
 
 use std::sync::OnceLock;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
 use ratatui::widgets::StatefulWidget;
 use ratatui_diff::{
     Diff, DiffDocument, DiffState, DiffTheme, FileSyntax, SyntaxHighlighter, SyntaxSource,
@@ -14,17 +14,14 @@ use ratatui_diff::{
 };
 
 use crate::num;
-use crate::theme::Rgb;
 
 /// `git diff -M v0.28.1 v0.29.0 -- 'src/*.rs'` in the ratatui repository.
 const PATCH: &str = include_str!("../assets/ratatui-0.28-0.29.diff");
 
-/// The shortest the diff holds, in seconds.
-pub const HOLD: f64 = 14.0;
 /// Rows scrolled a second, once the diff has come in.
 const SPEED: f32 = 12.0;
-/// The narrowest terminal that shows old and new side by side.
-const SPLIT: u16 = 150;
+/// The narrowest area that shows old and new side by side.
+const SPLIT: u16 = 110;
 
 struct Prepared {
     document: DiffDocument,
@@ -71,37 +68,23 @@ pub struct DiffView {
     started: f64,
     /// Rows still to scroll, short of a whole one.
     pending: f32,
-    /// How long it holds, in seconds.
-    pub hold: f64,
 }
 
 impl DiffView {
-    /// The `n`th time the diff plays.
-    pub fn new(n: usize, now: f64, hold: f64) -> Self {
+    /// The `n`th time the diff plays, from `now`.
+    pub fn new(n: usize, now: f64) -> Self {
         Self {
             state: DiffState::new(),
             file: n.saturating_mul(7),
             started: now,
             pending: 0.0,
-            hold,
         }
     }
 
-    pub fn background() -> Rgb {
-        theme()
-            .context
-            .bg
-            .map_or(Rgb::BLACK, |bg: Color| Rgb::from_color(bg))
-    }
-
-    /// Draws the diff at `now`, scrolled on by `dt` seconds' worth.
-    pub fn draw(&mut self, buf: &mut Buffer, now: f64, dt: f32) {
+    /// Draws the diff in `area` at `now`, scrolled on by `dt` seconds'
+    /// worth.
+    pub fn draw(&mut self, buf: &mut Buffer, area: Rect, now: f64, dt: f32) {
         let Some(prepared) = prepare() else { return };
-        // The bottom row is the caption's.
-        let area = Rect {
-            height: buf.area.height.saturating_sub(1),
-            ..buf.area
-        };
         let mode = if area.width >= SPLIT {
             ViewMode::Split
         } else {

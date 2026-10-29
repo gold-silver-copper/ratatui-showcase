@@ -3514,8 +3514,6 @@ name = "ratatui-markdown"
 version = "0.3.6"
 source = "git+https://github.com/celestia-island/ratatui-markdown?rev=cb26a62f7d8e0ff776c28a1a35718cb8171aca57#cb26a62f7d8e0ff776c28a1a35718cb8171aca57"
 dependencies = [
- "pest",
- "pest_derive",
  "ratatui",
  "unicode-width",
 ]

@@ -43,7 +43,6 @@ use tachyonfx::EffectManager;
 
 use crate::backdrop::{BACKDROPS, Backdrop};
 use crate::card::Card;
-use crate::diff::DiffView;
 use crate::director::{Director, Pin};
 use crate::fonts::SystemFonts;
 use crate::gallery::Gallery;
@@ -226,20 +225,49 @@ enum Phase {
 /// Scenes between two interludes.
 const SCENES_PER_CARD: usize = 1;
 
-/// What plays between scenes, in turns: the card about ratatui, widgets
-/// from its community, and the diff of its source.
+/// What shows: GPU scenes, or one of the interludes between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Scene,
+    Card,
+    Gallery,
+}
+
+impl Kind {
+    const ALL: [Kind; 3] = [Kind::Scene, Kind::Card, Kind::Gallery];
+
+    /// The kind `by` places on, wrapping round.
+    fn step(self, by: isize) -> Kind {
+        let len = Kind::ALL.len().cast_signed();
+        let at = Kind::ALL.iter().position(|&k| k == self).unwrap_or(0);
+        let next = at
+            .cast_signed()
+            .saturating_add(by)
+            .rem_euclid(len.max(1))
+            .cast_unsigned();
+        Kind::ALL.get(next).copied().unwrap_or(Kind::Scene)
+    }
+}
+
+/// What plays between scenes, in turns: the card about ratatui, and
+/// libraries from its community.
 enum Interlude {
     Card(Card),
     Gallery(Box<Gallery>),
-    Diff(Box<DiffView>),
 }
 
 impl Interlude {
+    fn kind(&self) -> Kind {
+        match self {
+            Interlude::Card(_) => Kind::Card,
+            Interlude::Gallery(_) => Kind::Gallery,
+        }
+    }
+
     fn hold(&self) -> f64 {
         match self {
             Interlude::Card(card) => card.hold,
             Interlude::Gallery(gallery) => gallery.hold,
-            Interlude::Diff(diff) => diff.hold,
         }
     }
 
@@ -247,7 +275,6 @@ impl Interlude {
         match self {
             Interlude::Card(card) => card.background(),
             Interlude::Gallery(gallery) => gallery.background(),
-            Interlude::Diff(_) => DiffView::background(),
         }
     }
 
@@ -255,7 +282,6 @@ impl Interlude {
         match self {
             Interlude::Card(_) => "about ratatui",
             Interlude::Gallery(_) => "community widgets",
-            Interlude::Diff(_) => "ratatui 0.28 → 0.29 in ratatui-diff",
         }
     }
 
@@ -263,7 +289,6 @@ impl Interlude {
         match self {
             Interlude::Card(card) => card.draw(buf, now),
             Interlude::Gallery(gallery) => gallery.draw(buf, now, dt, beat),
-            Interlude::Diff(diff) => diff.draw(buf, now, dt),
         }
     }
 }
@@ -286,12 +311,16 @@ struct Show {
     hold_until: f64,
     caption: bool,
     skip: bool,
-    /// The interlude on screen, and whether one comes once the scene has
-    /// left.
+    /// A switch asked for with the arrow keys: places along `Kind::ALL`.
+    jump: isize,
+    /// The interlude on screen, and the one that comes once what shows
+    /// has left.
     interlude: Option<Interlude>,
-    interlude_due: bool,
-    /// Interludes shown so far, and scenes since the last.
-    interludes: usize,
+    due: Option<Kind>,
+    /// Cards and gallery visits so far, and scenes since the last
+    /// interlude.
+    cards: usize,
+    visits: usize,
     scenes: usize,
     /// The next scene, laid out in the background while this one holds.
     next: Option<(u16, u16, Task<Stage>)>,
@@ -322,9 +351,11 @@ impl Show {
             hold_until: f64::MAX,
             caption: true,
             skip: false,
+            jump: 0,
             interlude: None,
-            interlude_due: false,
-            interludes: 0,
+            due: None,
+            cards: 0,
+            visits: 0,
             scenes: 0,
             next: None,
             director,
@@ -347,28 +378,33 @@ impl Show {
         };
     }
 
-    /// The next interlude; a card takes the colours of the scene before it.
-    fn new_interlude(&mut self, now: f64) -> Interlude {
-        let n = self.interludes;
-        self.interludes = n.saturating_add(1);
-        let turn = n.checked_div(3).unwrap_or(0);
+    /// The interlude that comes next on its own: the card and the gallery
+    /// take turns.
+    fn next_interlude(&self) -> Kind {
+        if self.cards > self.visits {
+            Kind::Gallery
+        } else {
+            Kind::Card
+        }
+    }
+
+    /// A new interlude of `kind`; a card takes the colours of the scene
+    /// before it.
+    fn new_interlude(&mut self, kind: Kind, now: f64) -> Interlude {
         let act = self.stage.as_ref().map_or(&self.act, |stage| &stage.act);
-        match n.checked_rem(3) {
-            Some(0) => {
-                let hold = self.tempo.bars(self.hold.max(card::HOLD));
-                Interlude::Card(Card::new(turn, act.theme(), now, hold))
-            }
-            Some(1) => {
-                let each = self.hold.max(gallery::SHOW);
-                let hold = self
-                    .tempo
-                    .bars(each * f64::from(num::u32_of(gallery::PER_VISIT)));
-                Interlude::Gallery(Box::new(Gallery::new(turn, act.theme(), now, hold)))
-            }
-            _ => {
-                let hold = self.tempo.bars(self.hold.max(diff::HOLD));
-                Interlude::Diff(Box::new(DiffView::new(turn, now, hold)))
-            }
+        if kind == Kind::Gallery {
+            let each = self.hold.max(gallery::SHOW);
+            let hold = self
+                .tempo
+                .bars(each * f64::from(num::u32_of(gallery::PER_VISIT)));
+            let gallery = Gallery::new(self.visits, act.theme(), now, hold);
+            self.visits = self.visits.saturating_add(1);
+            Interlude::Gallery(Box::new(gallery))
+        } else {
+            let hold = self.tempo.bars(self.hold.max(card::HOLD));
+            let card = Card::new(self.cards, act.theme(), now, hold);
+            self.cards = self.cards.saturating_add(1);
+            Interlude::Card(card)
         }
     }
 
@@ -444,11 +480,12 @@ fn input(
             || (ctrl && key.code == KeyCode::Char('c'))
         {
             exit.write_default();
-        } else if matches!(
-            key.code,
-            KeyCode::Char(' ') | KeyCode::Right | KeyCode::Enter
-        ) {
+        } else if matches!(key.code, KeyCode::Char(' ') | KeyCode::Enter) {
             show.skip = true;
+        } else if key.code == KeyCode::Right {
+            show.jump = show.jump.saturating_add(1);
+        } else if key.code == KeyCode::Left {
+            show.jump = show.jump.saturating_sub(1);
         } else if let KeyCode::Char(c) = key.code {
             // Keys are the visitor's choice, not the seed's.
             let rng = &mut fastrand::Rng::new();
@@ -532,8 +569,8 @@ fn frame(
             } else {
                 show.act = act;
             }
-            if std::mem::take(&mut show.interlude_due) {
-                show.interlude = Some(show.new_interlude(now));
+            if let Some(kind) = show.due.take() {
+                show.interlude = Some(show.new_interlude(kind, now));
             }
             effects.transition.cancel_unique_effect(());
             effects.accent.cancel_unique_effect(());
@@ -573,32 +610,72 @@ fn frame(
                         effects.accent.add_unique_effect((), accent);
                     }
                 }
-                if skip || now >= show.hold_until {
-                    effects.accent.cancel_unique_effect(());
-                    if let Some(interlude) = &show.interlude {
-                        effects
-                            .transition
-                            .add_unique_effect((), fx::card_leave(interlude.background()));
+                let jump = std::mem::take(&mut show.jump);
+                let showing = show.interlude.as_ref().map_or(Kind::Scene, Interlude::kind);
+                // In the gallery, skipping goes to its next library first.
+                let skip = skip
+                    && match &mut show.interlude {
+                        Some(Interlude::Gallery(gallery)) => match gallery.next(now) {
+                            Some(skipped) => {
+                                show.hold_until -= skipped;
+                                false
+                            }
+                            None => true,
+                        },
+                        _ => true,
+                    };
+                let to = if jump != 0 {
+                    Some(showing.step(jump))
+                } else if skip || now >= show.hold_until {
+                    Some(if showing == Kind::Scene {
+                        show.scenes = show.scenes.saturating_add(1);
+                        if show.scenes >= SCENES_PER_CARD {
+                            show.next_interlude()
+                        } else {
+                            Kind::Scene
+                        }
+                    } else {
+                        Kind::Scene
+                    })
+                } else {
+                    None
+                };
+                match to {
+                    None => {}
+                    Some(Kind::Scene) if showing == Kind::Scene => {
+                        effects.accent.cancel_unique_effect(());
+                        change(show, effects, &fonts, area, now);
+                    }
+                    Some(Kind::Scene) => {
+                        if let Some(interlude) = &show.interlude {
+                            effects
+                                .transition
+                                .add_unique_effect((), fx::card_leave(interlude.background()));
+                        }
                         if let Some(stage) = &show.stage {
                             let act = stage.act.clone();
                             show.pending =
                                 Some(show.take_next(&act, &fonts, area.width, area.height));
                         }
                         show.phase = Phase::Leaving;
-                    } else {
-                        show.scenes = show.scenes.saturating_add(1);
-                        if show.scenes >= SCENES_PER_CARD {
-                            show.scenes = 0;
-                            if let Some(stage) = &show.stage {
-                                effects
-                                    .transition
-                                    .add_unique_effect((), fx::leave(stage, area));
+                    }
+                    Some(kind) => {
+                        effects.accent.cancel_unique_effect(());
+                        match &show.interlude {
+                            Some(interlude) => effects
+                                .transition
+                                .add_unique_effect((), fx::card_leave(interlude.background())),
+                            None => {
+                                if let Some(stage) = &show.stage {
+                                    effects
+                                        .transition
+                                        .add_unique_effect((), fx::leave(stage, area));
+                                }
                             }
-                            show.interlude_due = true;
-                            show.phase = Phase::Leaving;
-                        } else {
-                            change(show, effects, &fonts, area, now);
                         }
+                        show.scenes = 0;
+                        show.due = Some(kind);
+                        show.phase = Phase::Leaving;
                     }
                 }
             }
@@ -612,8 +689,8 @@ fn frame(
                 }
             }
             Phase::Leaving if !effects.transition.is_running() => {
-                if std::mem::take(&mut show.interlude_due) {
-                    let interlude = show.new_interlude(now);
+                if let Some(kind) = show.due.take() {
+                    let interlude = show.new_interlude(kind, now);
                     effects
                         .transition
                         .add_unique_effect((), fx::card_enter(interlude.background(), area));

@@ -17,7 +17,8 @@ cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 
 | Key | Action |
 | --- | --- |
-| `Space`, `→`, `Enter` | Next scene |
+| `Space`, `Enter` | Next scene, or the next library among the community widgets |
+| `→`, `←` | Switch to the next or previous kind: scenes, the card about ratatui, community widgets |
 | `t` | Next colour theme |
 | `s` | Next shader |
 | `b` | Next background |
@@ -94,35 +95,36 @@ cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 
 ## Between scenes
 
-After each scene comes an interlude, at least 10 seconds long. Three take
+After each scene comes an interlude, at least 10 seconds long, drawn in flat
+surfaces, without borders, in the colours of the scene before it. Two take
 turns:
 
-- **A card about ratatui,** drawn with its own widgets in the colours of the
-  scene before it, calm enough to read from the back of a room: "ratatui" in
-  the classic 8x8 font, one fact about it typed out, and a dashboard of
-  built-in widgets with live data, each box titled with the widget's name: a
-  world map that draws itself on a `Canvas` before routes fly between
-  cities, a scrolling `Chart` and `Sparkline`, a `BarChart`, a `Table` of
-  apps built with ratatui, a `LineGauge`, and a `Gauge` counting down to the
-  next scene.
-- **Community widgets:** under a header that stays — ratatui's own
-  `RatatuiMascot`, "ratatui" in the 8x8 font and a line about it — libraries
-  from [awesome-ratatui](https://github.com/ratatui/awesome-ratatui) take
-  turns, three a visit, each sweeping in over the last:
-  [tui-globe](https://github.com/d10n/tui-globe) turning with cities marked,
-  [edtui](https://github.com/preiter93/edtui) typing out a ratatui hello world
-  before the window it makes appears,
+- **A card about ratatui,** calm enough to read from the back of a room:
+  "ratatui" in the classic 8x8 font, one fact about it typed out, and a
+  dashboard of built-in widgets with live data, each titled with the
+  widget's name: a world map that draws itself on a `Canvas` before routes
+  fly between cities, a scrolling `Chart` and `Sparkline`, a `BarChart`, a
+  `Table` of apps built with ratatui, a `LineGauge`, and a `Gauge` counting
+  down to the next scene.
+- **Community widgets:** under a bar that stays (ratatui's own
+  `RatatuiMascot`, "ratatui" in the 8x8 font and the libraries of the
+  visit), libraries from
+  [awesome-ratatui](https://github.com/ratatui/awesome-ratatui) take turns,
+  three a visit, each filling the screen beside a panel on what it is, how
+  to add it and how it's drawn:
+  [tui-globe](https://github.com/d10n/tui-globe) turning with cities marked;
+  [edtui](https://github.com/preiter93/edtui) typing out a ratatui hello
+  world, then what it draws;
+  [ratatui-diff](https://github.com/joshka/ratatui-diff) scrolling through
+  every change to ratatui's source from 0.28.1 to 0.29.0, with syntax
+  colours, side by side when there's room;
   [tui-qrcode](https://crates.io/crates/tui-qrcode) with a code for
-  ratatui.rs to scan from the screen,
+  ratatui.rs to scan from the screen;
   [ratatui-markdown](https://github.com/celestia-island/ratatui-markdown)
-  scrolling through a page about ratatui with a table and a diagram,
-  [tui-equalizer](https://crates.io/crates/tui-equalizer) jumping on the beat,
-  and [ratatui-wireframe](https://crates.io/crates/ratatui-wireframe)
+  scrolling through a page about ratatui;
+  [tui-equalizer](https://crates.io/crates/tui-equalizer) jumping on the
+  beat; and [ratatui-wireframe](https://crates.io/crates/ratatui-wireframe)
   turning an icosahedron.
-- **ratatui's own source as a diff:** every change to it from 0.28.1 to
-  0.29.0 scrolling past in [ratatui-diff](https://github.com/joshka/ratatui-diff),
-  with Rust syntax colours, side by side when the terminal is at least 150
-  columns wide. Each time it opens at a different file.
 
 ## How scenes are chosen
 

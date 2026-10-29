@@ -10,7 +10,7 @@ use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::canvas::{Canvas, Line as Stroke, Map, MapResolution, Points};
 use ratatui::widgets::{
-    Axis, Bar, BarChart, BarGroup, Block, BorderType, Chart, Dataset, Gauge, GraphType, LineGauge,
+    Axis, Bar, BarChart, BarGroup, Block, Chart, Dataset, Gauge, GraphType, LineGauge, Padding,
     Paragraph, Row, Sparkline, StatefulWidget, Table, TableState, Widget,
 };
 
@@ -137,7 +137,7 @@ impl Card {
             height: buf.area.height.saturating_sub(1),
             ..buf.area
         }
-        .inner(Margin::new(2, 1));
+        .inner(Margin::new(1, 0));
         let (title, body) = FACTS
             .get(self.index.checked_rem(FACTS.len()).unwrap_or(0))
             .copied()
@@ -449,6 +449,7 @@ impl Card {
         ];
         let axis = Style::new().fg(c.dim.color());
         Chart::new(datasets)
+            .legend_position(None)
             .block(self.colors.block("Chart"))
             .x_axis(
                 Axis::default()
@@ -470,7 +471,9 @@ impl Card {
 pub struct Colors {
     pub palette: Palette,
     pub bg: Rgb,
+    /// Surfaces on the background, and surfaces on those.
     pub panel: Rgb,
+    pub raised: Rgb,
     pub text: Rgb,
     pub dim: Rgb,
     pub border: Rgb,
@@ -484,6 +487,7 @@ impl Colors {
         Self {
             bg,
             panel: bg.lerp(palette.sample(0.0), 0.07),
+            raised: bg.lerp(palette.sample(0.0), 0.14),
             text,
             dim: text.lerp(bg, 0.45),
             border: palette.sample(0.15).lerp(bg, 0.4),
@@ -506,19 +510,23 @@ impl Colors {
         }
     }
 
-    /// A rounded box titled with a widget's name.
+    /// A flat surface titled with a widget's name: no borders, the title
+    /// on its own row.
     pub fn block<'a>(&self, title: &'a str) -> Block<'a> {
-        let c = self;
-        Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(c.border.color()))
+        Block::new()
             .title(Line::styled(
-                format!(" {title} "),
+                title,
                 Style::new()
-                    .fg(c.accent.color())
+                    .fg(self.accent.color())
                     .add_modifier(Modifier::BOLD),
             ))
-            .style(Style::new().bg(c.panel.color()).fg(c.text.color()))
+            .padding(Padding::horizontal(1))
+            .style(self.surface())
+    }
+
+    /// A flat surface's colours.
+    pub fn surface(&self) -> Style {
+        Style::new().bg(self.panel.color()).fg(self.text.color())
     }
 }
 
