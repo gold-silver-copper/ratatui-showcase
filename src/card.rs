@@ -61,13 +61,14 @@ const FACTS: &[(&str, &str)] = &[
     (
         "Open source",
         "MIT licensed and built by its community, ratatui carries on the tui-rs \
-         crate. Apps like codex, gitui, yazi, bottom and atuin are built with it.",
+         crate. Apps like codex, herdr, gitui, yazi, bottom and atuin are built with it.",
     ),
 ];
 
 /// Apps built with ratatui, for the table.
 const APPS: &[(&str, &str)] = &[
     ("codex", "OpenAI's coding agent"),
+    ("herdr", "an AI agent multiplexer"),
     ("gitui", "git, fast"),
     ("yazi", "a file manager"),
     ("bottom", "a system monitor"),
