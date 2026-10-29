@@ -63,6 +63,24 @@ pub fn leave(stage: &Stage, area: Rect) -> Effect {
     }
 }
 
+/// A card comes in calmly: a soft sweep from its background.
+pub fn card_enter(bg: Rgb, area: Rect) -> Effect {
+    let bg = bg.color();
+    fx::sweep_in(
+        motion(),
+        gradient(area),
+        0,
+        bg,
+        (1200, Interpolation::QuadOut),
+    )
+}
+
+/// A card fades into its background.
+pub fn card_leave(bg: Rgb) -> Effect {
+    let bg = bg.color();
+    fx::fade_to(bg, bg, (900, Interpolation::QuadIn))
+}
+
 const HUE_RIPPLE: [f32; 3] = [120.0, 10.0, 6.0];
 
 /// A brief flourish over a scene that is holding still. A cell's foreground

@@ -3,6 +3,7 @@
 
 mod art;
 mod backdrop;
+mod card;
 mod director;
 mod fonts;
 mod fx;
@@ -39,6 +40,7 @@ use ratatui::crossterm::terminal;
 use tachyonfx::EffectManager;
 
 use crate::backdrop::{BACKDROPS, Backdrop};
+use crate::card::Card;
 use crate::director::{Director, Pin};
 use crate::fonts::SystemFonts;
 use crate::glyphs::{GlyphSet, Glyphs};
@@ -215,6 +217,9 @@ enum Phase {
     Leaving,
 }
 
+/// Scenes between two cards.
+const SCENES_PER_CARD: usize = 1;
+
 #[derive(Resource)]
 struct Show {
     act: Act,
@@ -233,6 +238,12 @@ struct Show {
     hold_until: f64,
     caption: bool,
     skip: bool,
+    /// The card on screen, and whether one comes once the scene has left.
+    card: Option<Card>,
+    card_due: bool,
+    /// Cards shown so far, and scenes since the last.
+    cards: usize,
+    scenes: usize,
     /// The next scene, laid out in the background while this one holds.
     next: Option<(u16, u16, Task<Stage>)>,
     director: Director,
@@ -262,6 +273,10 @@ impl Show {
             hold_until: f64::MAX,
             caption: true,
             skip: false,
+            card: None,
+            card_due: false,
+            cards: 0,
+            scenes: 0,
             next: None,
             director,
             epoch: 0.0,
@@ -271,15 +286,25 @@ impl Show {
     /// The scene starts holding at `now`, until the first bar line a hold
     /// later.
     fn hold_from(&mut self, now: f64) {
+        let hold = self.card.as_ref().map_or(self.hold, |card| card.hold);
         self.phase = Phase::Holding;
-        self.prepare_at = now + self.hold * 0.2;
-        self.hold_until = self.tempo.next_bar(now + self.hold);
-        let accent = self.tempo.next_bar(now + self.hold * 0.45);
+        self.prepare_at = now + hold * 0.2;
+        self.hold_until = self.tempo.next_bar(now + hold);
+        let accent = self.tempo.next_bar(now + hold * 0.45);
         self.accent_at = if accent < self.hold_until {
             accent
         } else {
             f64::MAX
         };
+    }
+
+    /// The next card, in the colours of the scene before it.
+    fn new_card(&mut self, now: f64) -> Card {
+        let act = self.stage.as_ref().map_or(&self.act, |stage| &stage.act);
+        let hold = self.tempo.bars(self.hold.max(card::HOLD));
+        let card = Card::new(self.cards, act.theme(), now, hold);
+        self.cards = self.cards.saturating_add(1);
+        card
     }
 
     /// Starts laying out the scene after `current` on another thread.
@@ -438,8 +463,12 @@ fn frame(
             // A half-finished transition would play on the old layout: settle it.
             if let Some(pending) = show.pending.take() {
                 show.act = pending.act;
+                show.card = None;
             } else {
                 show.act = act;
+            }
+            if std::mem::take(&mut show.card_due) {
+                show.card = Some(show.new_card(now));
             }
             effects.transition.cancel_unique_effect(());
             effects.accent.cancel_unique_effect(());
@@ -472,7 +501,8 @@ fn frame(
                 }
                 if now >= show.accent_at {
                     show.accent_at = f64::MAX;
-                    if let Some(stage) = &show.stage
+                    if show.card.is_none()
+                        && let Some(stage) = &show.stage
                         && let Some(accent) = fx::accent(stage, area)
                     {
                         effects.accent.add_unique_effect((), accent);
@@ -480,7 +510,31 @@ fn frame(
                 }
                 if skip || now >= show.hold_until {
                     effects.accent.cancel_unique_effect(());
-                    change(show, effects, &fonts, area, now);
+                    if let Some(card) = &show.card {
+                        effects
+                            .transition
+                            .add_unique_effect((), fx::card_leave(card.background()));
+                        if let Some(stage) = &show.stage {
+                            let act = stage.act.clone();
+                            show.pending =
+                                Some(show.take_next(&act, &fonts, area.width, area.height));
+                        }
+                        show.phase = Phase::Leaving;
+                    } else {
+                        show.scenes = show.scenes.saturating_add(1);
+                        if show.scenes >= SCENES_PER_CARD {
+                            show.scenes = 0;
+                            if let Some(stage) = &show.stage {
+                                effects
+                                    .transition
+                                    .add_unique_effect((), fx::leave(stage, area));
+                            }
+                            show.card_due = true;
+                            show.phase = Phase::Leaving;
+                        } else {
+                            change(show, effects, &fonts, area, now);
+                        }
+                    }
                 }
             }
             Phase::Crossing => {
@@ -493,7 +547,14 @@ fn frame(
                 }
             }
             Phase::Leaving if !effects.transition.is_running() => {
-                if let Some(stage) = show.pending.take() {
+                if std::mem::take(&mut show.card_due) {
+                    let card = show.new_card(now);
+                    effects
+                        .transition
+                        .add_unique_effect((), fx::card_enter(card.background(), area));
+                    show.card = Some(card);
+                } else if let Some(stage) = show.pending.take() {
+                    show.card = None;
                     // The old scene is gone: a good moment for the clock to
                     // start over unseen.
                     show.rebase(now, 600.0);
@@ -508,20 +569,25 @@ fn frame(
         }
 
         let Some(stage) = &show.stage else { return };
-        let frame_info = gpu::Frame {
-            t: num::narrow(now - show.epoch),
-            beat: show.tempo.phase(now),
-            now,
-            dt: dt.as_secs_f32(),
-            dither: dither.0,
-            calm,
-        };
-        if let Some(reason) = gpu.render(&glyphs.0, stage, show.crossing.as_ref(), frame_info) {
-            notice(buffer, &reason);
-            return;
-        }
-        if let Some(cells) = gpu_frame.cells(area.width, area.height) {
-            gpu::draw(cells, buffer);
+        if let Some(card) = &show.card {
+            gpu.idle();
+            card.draw(buffer, now, show.tempo.phase(now));
+        } else {
+            let frame_info = gpu::Frame {
+                t: num::narrow(now - show.epoch),
+                beat: show.tempo.phase(now),
+                now,
+                dt: dt.as_secs_f32(),
+                dither: dither.0,
+                calm,
+            };
+            if let Some(reason) = gpu.render(&glyphs.0, stage, show.crossing.as_ref(), frame_info) {
+                notice(buffer, &reason);
+                return;
+            }
+            if let Some(cells) = gpu_frame.cells(area.width, area.height) {
+                gpu::draw(cells, buffer);
+            }
         }
         effects.transition.process_effects(dt.into(), buffer, area);
         effects.accent.process_effects(dt.into(), buffer, area);
@@ -529,21 +595,28 @@ fn frame(
         if show.caption {
             let act = &stage.act;
             let mut caption = format!(
-                "seed {}  ·  {}×{}  ·  {}  ·  {}  ·  {}",
+                "seed {}  ·  {}×{}",
                 show.director.seed(),
                 area.width,
-                area.height,
-                act.label(),
-                act.theme().name,
-                act.shader.name()
+                area.height
             );
-            caption += &format!("  ·  {}  ·  {}", act.backdrop.name(), act.look.name());
-            caption += &format!(
-                "  ·  {}  ·  {}  ·  {}",
-                act.mode.name(),
-                act.post.name(),
-                act.idle.name()
-            );
+            if let Some(card) = &show.card {
+                caption += &format!("  ·  {}", card.name());
+            } else {
+                caption += &format!(
+                    "  ·  {}  ·  {}  ·  {}",
+                    act.label(),
+                    act.theme().name,
+                    act.shader.name()
+                );
+                caption += &format!("  ·  {}  ·  {}", act.backdrop.name(), act.look.name());
+                caption += &format!(
+                    "  ·  {}  ·  {}  ·  {}",
+                    act.mode.name(),
+                    act.post.name(),
+                    act.idle.name()
+                );
+            }
             if let Some(profile) = &gpu_frame.profile {
                 caption = format!("{}  ·  {profile}  ·  {caption}", wire.unwrap_or_default());
             }
@@ -585,24 +658,7 @@ fn flicker(data: &[u32], (last, before): &mut Frames) -> (usize, usize) {
 
 /// `text` wrapped and centred on an otherwise blank screen.
 fn notice(buf: &mut ratatui::buffer::Buffer, text: &str) {
-    let width = usize::from(buf.area.width.saturating_sub(4)).max(10);
-    let mut lines: Vec<String> = Vec::new();
-    for word in text.split_whitespace() {
-        match lines.last_mut() {
-            Some(line)
-                if line
-                    .chars()
-                    .count()
-                    .saturating_add(1)
-                    .saturating_add(word.chars().count())
-                    <= width =>
-            {
-                line.push(' ');
-                line.push_str(word);
-            }
-            _ => lines.push(word.to_owned()),
-        }
-    }
+    let lines = card::wrap(text, usize::from(buf.area.width.saturating_sub(4)));
     let top = buf.area.height.saturating_sub(num::u16_of(lines.len())) / 2;
     for (y, line) in (top..).zip(&lines) {
         let x = buf
