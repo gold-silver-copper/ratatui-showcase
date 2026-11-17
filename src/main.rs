@@ -3,7 +3,7 @@
 
 mod art;
 mod backdrop;
-mod card;
+mod diff;
 mod director;
 mod fonts;
 mod fx;
@@ -16,10 +16,12 @@ mod params;
 mod profile;
 mod screen;
 mod shader;
+mod showcase;
 mod stage;
 mod tempo;
 mod theme;
 mod transition;
+mod widgets;
 mod zoom;
 
 use std::io::Write;
@@ -40,10 +42,10 @@ use ratatui::crossterm::terminal;
 use tachyonfx::EffectManager;
 
 use crate::backdrop::{BACKDROPS, Backdrop};
-use crate::card::Card;
 use crate::director::{Director, Pin};
 use crate::fonts::SystemFonts;
 use crate::glyphs::{GlyphSet, Glyphs};
+use crate::showcase::Showcase;
 use crate::stage::{Act, IDLES, Idle, Look, Mode, Post, Stage};
 use crate::tempo::Tempo;
 use crate::theme::{Palette, SHADERS, Shader};
@@ -147,6 +149,8 @@ fn main() -> ExitCode {
             return code;
         }
     };
+    diff::warm();
+    showcase::warm();
     let exit = App::new()
         .add_plugins((
             DefaultPlugins
@@ -217,8 +221,26 @@ enum Phase {
     Leaving,
 }
 
-/// Scenes between two cards.
-const SCENES_PER_CARD: usize = 1;
+/// Scenes between two showcases.
+const SCENES_PER_SHOWCASE: usize = 1;
+
+/// What shows: GPU scenes, or the showcase of widgets between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Scene,
+    Showcase,
+}
+
+impl Kind {
+    /// The other kind, `by` times over.
+    fn step(self, by: isize) -> Kind {
+        match (self, by.rem_euclid(2) == 0) {
+            (kind, true) => kind,
+            (Kind::Scene, false) => Kind::Showcase,
+            (Kind::Showcase, false) => Kind::Scene,
+        }
+    }
+}
 
 #[derive(Resource)]
 struct Show {
@@ -238,11 +260,18 @@ struct Show {
     hold_until: f64,
     caption: bool,
     skip: bool,
-    /// The card on screen, and whether one comes once the scene has left.
-    card: Option<Card>,
-    card_due: bool,
-    /// Cards shown so far, and scenes since the last.
-    cards: usize,
+    /// A switch asked for with the arrow keys: how many times over.
+    jump: isize,
+    /// Since when the show is paused, and for how long it was paused
+    /// before, in seconds since launch: its clock runs that much behind.
+    paused: Option<f64>,
+    stopped: f64,
+    /// The showcase on screen, and whether it comes once what shows has
+    /// left.
+    showcase: Option<Box<Showcase>>,
+    due: bool,
+    /// Showcases so far, and scenes since the last one.
+    visits: usize,
     scenes: usize,
     /// The next scene, laid out in the background while this one holds.
     next: Option<(u16, u16, Task<Stage>)>,
@@ -273,9 +302,12 @@ impl Show {
             hold_until: f64::MAX,
             caption: true,
             skip: false,
-            card: None,
-            card_due: false,
-            cards: 0,
+            jump: 0,
+            paused: None,
+            stopped: 0.0,
+            showcase: None,
+            due: false,
+            visits: 0,
             scenes: 0,
             next: None,
             director,
@@ -286,7 +318,7 @@ impl Show {
     /// The scene starts holding at `now`, until the first bar line a hold
     /// later.
     fn hold_from(&mut self, now: f64) {
-        let hold = self.card.as_ref().map_or(self.hold, |card| card.hold);
+        let hold = self.showcase.as_ref().map_or(self.hold, |s| s.hold);
         self.phase = Phase::Holding;
         self.prepare_at = now + hold * 0.2;
         self.hold_until = self.tempo.next_bar(now + hold);
@@ -298,13 +330,16 @@ impl Show {
         };
     }
 
-    /// The next card, in the colours of the scene before it.
-    fn new_card(&mut self, now: f64) -> Card {
+    /// A new showcase, in the colours of the scene before it.
+    fn new_showcase(&mut self, now: f64) -> Box<Showcase> {
         let act = self.stage.as_ref().map_or(&self.act, |stage| &stage.act);
-        let hold = self.tempo.bars(self.hold.max(card::HOLD));
-        let card = Card::new(self.cards, act.theme(), now, hold);
-        self.cards = self.cards.saturating_add(1);
-        card
+        let each = self.hold.max(showcase::SHOW);
+        let hold = self
+            .tempo
+            .bars(each * f64::from(num::u32_of(showcase::LIBRARIES)));
+        let showcase = Showcase::new(self.visits, act.theme(), now, hold);
+        self.visits = self.visits.saturating_add(1);
+        Box::new(showcase)
     }
 
     /// Starts laying out the scene after `current` on another thread.
@@ -365,6 +400,7 @@ fn input(
     mut resizes: MessageReader<ResizeMessage>,
     mut show: ResMut<Show>,
     mut exit: MessageWriter<AppExit>,
+    time: Res<Time>,
 ) {
     // A new mode needs a fresh stage, so its simulation starts from scratch.
     let mut rebuild = resizes.read().count() > 0;
@@ -379,11 +415,12 @@ fn input(
             || (ctrl && key.code == KeyCode::Char('c'))
         {
             exit.write_default();
-        } else if matches!(
-            key.code,
-            KeyCode::Char(' ') | KeyCode::Right | KeyCode::Enter
-        ) {
+        } else if matches!(key.code, KeyCode::Char(' ') | KeyCode::Enter) {
             show.skip = true;
+        } else if key.code == KeyCode::Right {
+            show.jump = show.jump.saturating_add(1);
+        } else if key.code == KeyCode::Left {
+            show.jump = show.jump.saturating_sub(1);
         } else if let KeyCode::Char(c) = key.code {
             // Keys are the visitor's choice, not the seed's.
             let rng = &mut fastrand::Rng::new();
@@ -411,6 +448,13 @@ fn input(
                     rebuild = true;
                 }
                 'i' => show.caption = !show.caption,
+                'f' => {
+                    let at = time.elapsed_secs_f64();
+                    match show.paused.take() {
+                        Some(since) => show.stopped += at - since,
+                        None => show.paused = Some(at),
+                    }
+                }
                 _ => {}
             }
         }
@@ -432,7 +476,12 @@ fn frame(
 ) -> Result {
     let show = &mut *show;
     let effects = effects.0.get_mut().unwrap_or_else(PoisonError::into_inner);
-    let now = time.elapsed_secs_f64();
+    // Paused, the last frame stays and the show's clock stands still.
+    if show.paused.is_some() {
+        gpu.idle();
+        return Ok(());
+    }
+    let now = time.elapsed_secs_f64() - show.stopped;
     // While the terminal falls behind, some frames aren't drawn at all.
     let Some(dt) = screen.due(time.delta()) else {
         gpu.idle();
@@ -463,12 +512,12 @@ fn frame(
             // A half-finished transition would play on the old layout: settle it.
             if let Some(pending) = show.pending.take() {
                 show.act = pending.act;
-                show.card = None;
+                show.showcase = None;
             } else {
                 show.act = act;
             }
-            if std::mem::take(&mut show.card_due) {
-                show.card = Some(show.new_card(now));
+            if std::mem::take(&mut show.due) {
+                show.showcase = Some(show.new_showcase(now));
             }
             effects.transition.cancel_unique_effect(());
             effects.accent.cancel_unique_effect(());
@@ -501,39 +550,80 @@ fn frame(
                 }
                 if now >= show.accent_at {
                     show.accent_at = f64::MAX;
-                    if show.card.is_none()
+                    if show.showcase.is_none()
                         && let Some(stage) = &show.stage
                         && let Some(accent) = fx::accent(stage, area)
                     {
                         effects.accent.add_unique_effect((), accent);
                     }
                 }
-                if skip || now >= show.hold_until {
-                    effects.accent.cancel_unique_effect(());
-                    if let Some(card) = &show.card {
-                        effects
-                            .transition
-                            .add_unique_effect((), fx::card_leave(card.background()));
+                let jump = std::mem::take(&mut show.jump);
+                let showing = if show.showcase.is_some() {
+                    Kind::Showcase
+                } else {
+                    Kind::Scene
+                };
+                // In the showcase, skipping goes to its next library first.
+                let skip = skip
+                    && match show.showcase.as_mut().and_then(|s| s.next(now)) {
+                        Some(skipped) => {
+                            show.hold_until -= skipped;
+                            false
+                        }
+                        None => true,
+                    };
+                let to = if jump != 0 {
+                    Some(showing.step(jump))
+                } else if skip || now >= show.hold_until {
+                    Some(if showing == Kind::Scene {
+                        show.scenes = show.scenes.saturating_add(1);
+                        if show.scenes >= SCENES_PER_SHOWCASE {
+                            Kind::Showcase
+                        } else {
+                            Kind::Scene
+                        }
+                    } else {
+                        Kind::Scene
+                    })
+                } else {
+                    None
+                };
+                match (showing, to) {
+                    (_, None) => {}
+                    (Kind::Scene, Some(Kind::Scene)) => {
+                        effects.accent.cancel_unique_effect(());
+                        change(show, effects, &fonts, area, now);
+                    }
+                    (Kind::Showcase, Some(Kind::Scene)) => {
+                        if let Some(showcase) = &show.showcase {
+                            effects
+                                .transition
+                                .add_unique_effect((), fx::showcase_leave(showcase.background()));
+                        }
                         if let Some(stage) = &show.stage {
                             let act = stage.act.clone();
                             show.pending =
                                 Some(show.take_next(&act, &fonts, area.width, area.height));
                         }
                         show.phase = Phase::Leaving;
-                    } else {
-                        show.scenes = show.scenes.saturating_add(1);
-                        if show.scenes >= SCENES_PER_CARD {
-                            show.scenes = 0;
-                            if let Some(stage) = &show.stage {
-                                effects
-                                    .transition
-                                    .add_unique_effect((), fx::leave(stage, area));
+                    }
+                    (_, Some(Kind::Showcase)) => {
+                        effects.accent.cancel_unique_effect(());
+                        match &show.showcase {
+                            Some(showcase) => effects
+                                .transition
+                                .add_unique_effect((), fx::showcase_leave(showcase.background())),
+                            None => {
+                                if let Some(stage) = &show.stage {
+                                    effects
+                                        .transition
+                                        .add_unique_effect((), fx::leave(stage, area));
+                                }
                             }
-                            show.card_due = true;
-                            show.phase = Phase::Leaving;
-                        } else {
-                            change(show, effects, &fonts, area, now);
                         }
+                        show.scenes = 0;
+                        show.due = true;
+                        show.phase = Phase::Leaving;
                     }
                 }
             }
@@ -547,14 +637,14 @@ fn frame(
                 }
             }
             Phase::Leaving if !effects.transition.is_running() => {
-                if std::mem::take(&mut show.card_due) {
-                    let card = show.new_card(now);
+                if std::mem::take(&mut show.due) {
+                    let showcase = show.new_showcase(now);
                     effects
                         .transition
-                        .add_unique_effect((), fx::card_enter(card.background(), area));
-                    show.card = Some(card);
+                        .add_unique_effect((), fx::showcase_enter(showcase.background(), area));
+                    show.showcase = Some(showcase);
                 } else if let Some(stage) = show.pending.take() {
-                    show.card = None;
+                    show.showcase = None;
                     // The old scene is gone: a good moment for the clock to
                     // start over unseen.
                     show.rebase(now, 600.0);
@@ -569,9 +659,9 @@ fn frame(
         }
 
         let Some(stage) = &show.stage else { return };
-        if let Some(card) = &show.card {
+        if let Some(showcase) = &mut show.showcase {
             gpu.idle();
-            card.draw(buffer, now, show.tempo.phase(now));
+            showcase.draw(buffer, now, dt.as_secs_f32(), show.tempo.phase(now));
         } else {
             let frame_info = gpu::Frame {
                 t: num::narrow(now - show.epoch),
@@ -600,8 +690,8 @@ fn frame(
                 area.width,
                 area.height
             );
-            if let Some(card) = &show.card {
-                caption += &format!("  ·  {}", card.name());
+            if show.showcase.is_some() {
+                caption += "  ·  showcase";
             } else {
                 caption += &format!(
                     "  ·  {}  ·  {}  ·  {}",
@@ -658,7 +748,7 @@ fn flicker(data: &[u32], (last, before): &mut Frames) -> (usize, usize) {
 
 /// `text` wrapped and centred on an otherwise blank screen.
 fn notice(buf: &mut ratatui::buffer::Buffer, text: &str) {
-    let lines = card::wrap(text, usize::from(buf.area.width.saturating_sub(4)));
+    let lines = widgets::wrap(text, usize::from(buf.area.width.saturating_sub(4)));
     let top = buf.area.height.saturating_sub(num::u16_of(lines.len())) / 2;
     for (y, line) in (top..).zip(&lines) {
         let x = buf
