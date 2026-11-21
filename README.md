@@ -13,6 +13,7 @@ cargo run --release -- --watch     # edit src/shaders and watch it change
 cargo run --release -- --profile   # GPU and terminal cost in the caption
 cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 cargo run --release -- --no-cards  # only the scenes, no cards between them
+cargo run --release -- --music     # with a soundtrack made up for the seed
 ```
 
 | Key | Action |
@@ -40,6 +41,7 @@ cargo run --release -- --no-cards  # only the scenes, no cards between them
 | `--pin LAYER=CHOICE` | Keep a layer in every scene, whatever the director would pick: `theme`, `shader`, `backdrop`, `look`, `style`, `mode`, `post` or `motion`, such as `post=paint`, `shader=plasma`, `backdrop=mandelbrot` or `theme=ember`. Repeatable. |
 | `--dither` | Dither colours with blue noise moving on by the golden ratio each frame, for smoother gradients; cells then change every frame, so the terminal works harder. |
 | `--no-cards` | Play scene after scene, without the cards about ratatui and its widgets between them. |
+| `--music` | Play music made up for the seed, in time with the show (see [Music](#music)). |
 
 ## What it shows
 
@@ -106,6 +108,20 @@ the back of a room. `--no-cards` leaves them out. Two kinds take turns:
   routes fly between cities, a `Sparkline`, a `BarChart` and a `Gauge`
   counting down to the next scene; or `Tabs`, a scrolling `Chart`, a `Table`
   of the widgets and a `LineGauge`.
+
+## Music
+
+With `--music` the show plays its own soundtrack, an endless tune in the
+style of a demoscene tracker module, synthesized sample by sample as it
+plays (`src/music.rs`): four-on-the-floor kicks, snares and hi-hats made of
+noise, a filtered saw bass, chip arpeggios that run through each chord once
+every step, a square-wave lead with vibrato and a ping-pong echo, and
+detuned pads. Sections of eight bars build up, drop and break down; every
+round of eight sections draws its key, scale and chord progression afresh
+from the seed, and every melody is made up for its section. It keeps the
+show's tempo and runs on the show's clock, so its bars line up with the bar
+lines the cuts land on, and the same seed plays the same music over the
+same scenes.
 
 ## How scenes are chosen
 

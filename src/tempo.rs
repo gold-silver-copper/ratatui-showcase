@@ -22,6 +22,11 @@ impl Tempo {
         }
     }
 
+    /// Seconds per beat.
+    pub fn beat(self) -> f64 {
+        self.beat
+    }
+
     pub fn bar(self) -> f64 {
         self.beat * BEATS_PER_BAR
     }
