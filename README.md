@@ -12,6 +12,7 @@ cargo run --release -- --seed 1234 # the scenes of seed 1234 again
 cargo run --release -- --watch     # edit src/shaders and watch it change
 cargo run --release -- --profile   # GPU and terminal cost in the caption
 cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
+cargo run --release -- --no-cards  # only the scenes, no cards between them
 ```
 
 | Key | Action |
@@ -38,6 +39,7 @@ cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 | `--profile` | Show the GPU time of each phase in the caption (timestamp queries). |
 | `--pin LAYER=CHOICE` | Keep a layer in every scene, whatever the director would pick: `theme`, `shader`, `backdrop`, `look`, `style`, `mode`, `post` or `motion`, such as `post=paint`, `shader=plasma`, `backdrop=mandelbrot` or `theme=ember`. Repeatable. |
 | `--dither` | Dither colours with blue noise moving on by the golden ratio each frame, for smoother gradients; cells then change every frame, so the terminal works harder. |
+| `--no-cards` | Play scene after scene, without the cards about ratatui and its widgets between them. |
 
 ## What it shows
 
@@ -95,7 +97,7 @@ cargo run --release -- --pin post=paint --pin mode=slime   # keep layers fixed
 
 After each scene a card holds for at least 10 seconds, drawn with ratatui's
 own widgets in the colours of the scene before it, calm enough to read from
-the back of a room. Two kinds take turns:
+the back of a room. `--no-cards` leaves them out. Two kinds take turns:
 
 - **About ratatui:** Ferris the crab snapping his claws to the beat beside
   "ratatui" in the classic 8x8 font, and one fact about ratatui, typed out.
