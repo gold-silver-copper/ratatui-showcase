@@ -115,10 +115,11 @@ plays (`src/music.rs`): four-on-the-floor kicks, snares and hi-hats made of
 noise, a filtered saw bass, chip arpeggios that run through each chord once
 every step, a square-wave lead with vibrato and a ping-pong echo, and
 detuned pads. Sections of eight bars build up, drop and break down; every
-round of eight sections moves to a new key, scale and chord progression, and
-every melody is made up for its section. It keeps the show's tempo and
-starts on its clock, so its bars line up with the bar lines the cuts land
-on, and a seed plays the same music again.
+round of eight sections draws its key, scale and chord progression afresh
+from the seed, and every melody is made up for its section. It keeps the
+show's tempo and runs on the show's clock, so its bars line up with the bar
+lines the cuts land on, and the same seed plays the same music over the
+same scenes.
 
 ## How scenes are chosen
 

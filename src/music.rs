@@ -236,12 +236,10 @@ fn melody(seed: u64, spot: Spot) -> [Option<Tone>; 16] {
         pick(state, n)
     };
     let rhythm = choose(&RHYTHMS, next(u64::MAX)).unwrap_or(0x5555);
-    let onsets: Vec<u32> = (0..16)
-        .filter(|&p| rhythm.checked_shr(p).is_some_and(|bits| bits & 1 == 1))
-        .collect();
+    let onset = |p: u32| rhythm.checked_shr(p).is_some_and(|bits| bits & 1 == 1);
     let mut notes = [None; 16];
     let mut degree = spot.chord;
-    for (i, &from) in onsets.iter().enumerate() {
+    for from in (0..16).filter(|&p| onset(p)) {
         degree = if from % 4 == 0 {
             let chord_tone = choose(&[0, 2, 4, 7], next(4)).unwrap_or(0);
             spot.chord.saturating_add(chord_tone)
@@ -251,7 +249,9 @@ fn melody(seed: u64, spot: Spot) -> [Option<Tone>; 16] {
                 .saturating_add(walk)
                 .clamp(spot.chord.saturating_sub(3), spot.chord.saturating_add(9))
         };
-        let end = onsets.get(i.saturating_add(1)).copied().unwrap_or(16);
+        let end = (from.saturating_add(1)..16)
+            .find(|&p| onset(p))
+            .unwrap_or(16);
         // Now and then a note is cut short, so the line breathes.
         let to = if next(3) == 0 {
             end.min(from.saturating_add(2))
@@ -318,12 +318,15 @@ impl Player {
         let spot = Spot::new(seed, step);
         let part = spot.part;
         // Seconds since the latest step at most `reach` back that `hit`
-        // gives a velocity for, and that velocity.
-        let since = |reach: u64, hit: &dyn Fn(u64, Spot) -> Option<f64>| {
+        // gives a velocity for, that velocity faded out over the last 20 ms
+        // before the hit falls out of reach, and the step.
+        let since = |reach: u64, hit: &dyn Fn(Spot) -> Option<f64>| {
             (0..=reach).find_map(|back| {
                 let at = step.checked_sub(back)?;
-                let velocity = hit(at, Spot::new(seed, at))?;
-                Some((into + back as f64 * len, velocity, at))
+                let velocity = hit(Spot::new(seed, at))?;
+                let tau = into + back as f64 * len;
+                let fade = (((reach as f64 + 1.0) * len - tau) / 0.02).clamp(0.0, 1.0);
+                Some((tau, velocity * fade, at))
             })
         };
         let noise = noise(n);
@@ -335,35 +338,42 @@ impl Player {
             right += v * pan;
         };
 
-        if let Some((tau, v, _)) = since(4, &|_, s| kick(seed, s)) {
+        if let Some((tau, v, _)) = since(4, &|s| kick(seed, s)) {
             let phase = 48.0 * tau + 120.0 * (1.0 - (-28.0 * tau).exp()) / 28.0;
             both(0.9 * v * (TAU * phase).sin() * (-6.0 * tau).exp(), 0.5);
         }
-        if let Some((tau, v, _)) = since(4, &|_, s| snare(s)) {
+        if let Some((tau, v, _)) = since(4, &|s| snare(s)) {
             let tone = (TAU * 190.0 * tau).sin() * (-20.0 * tau).exp();
             both(0.45 * v * (0.5 * tone + noise * (-14.0 * tau).exp()), 0.45);
         }
-        if let Some((tau, v, _)) = since(2, &|_, s| hat(s)) {
-            both(0.35 * v * bright * (-v * 55.0 * tau).exp(), 0.65);
+        if let Some((tau, v, _)) = since(2, &|s| hat(s)) {
+            let decay = if v < 0.7 { 30.0 } else { 55.0 };
+            both(0.35 * v * bright * (-decay * tau).exp(), 0.65);
         }
-        if let Some((tau, _, _)) = since(24, &|_, s| crash(s)) {
+        // A crash on the first step of a section with drums.
+        let first = step.saturating_sub(step % (STEPS * BARS));
+        let tau = into + step.saturating_sub(first) as f64 * len;
+        if Spot::new(seed, first).part.kick {
             both(0.3 * bright * (-2.2 * tau).exp(), 0.35);
         }
 
-        if part.bass
-            && let Some((tau, _, at)) = since(3, &|_, s| bass(seed, s).map(|_| 1.0))
-        {
+        // The filter keeps running between notes, so a note never stops
+        // with a jump.
+        let (saw, cutoff) = since(3, &|s| {
+            s.part.bass.then(|| bass(seed, s)).flatten().map(|_| 1.0)
+        })
+        .map_or((0.0, 180.0), |(tau, v, at)| {
             let onset = Spot::new(seed, at);
             let degree = bass(seed, onset).unwrap_or(0);
             let freq = onset.key.freq(onset.chord.saturating_add(degree), 0);
-            let saw = 2.0 * (freq * tau).fract() - 1.0;
-            let cutoff = 180.0 + 2_200.0 * (-12.0 * tau).exp();
-            let k = 1.0 - (-TAU * cutoff / RATE).exp();
-            let [a, b] = &mut self.bass_low;
-            *a += (saw * (-3.5 * tau).exp() - *a) * k;
-            *b += (*a - *b) * k;
-            both(0.5 * *b, 0.5);
-        }
+            let saw = v * (2.0 * (freq * tau).fract() - 1.0) * (-3.5 * tau).exp();
+            (saw, 180.0 + 2_200.0 * (-12.0 * tau).exp())
+        });
+        let k = 1.0 - (-TAU * cutoff / RATE).exp();
+        let [a, b] = &mut self.bass_low;
+        *a += (saw - *a) * k;
+        *b += (*a - *b) * k;
+        both(0.5 * *b, 0.5);
 
         let chord = [0, 2, 4].map(|d| spot.key.freq(spot.chord.saturating_add(d), 2));
         if part.pad || part.pluck {
@@ -482,11 +492,6 @@ fn hat(s: Spot) -> Option<f64> {
         Hats::Eighths => (s.pos % 4 == 2).then_some(0.8),
         Hats::Sixteenths => Some(if s.pos % 4 == 2 { 0.5 } else { 0.9 }),
     }
-}
-
-/// A crash on the first step of a section with drums.
-fn crash(s: Spot) -> Option<f64> {
-    (s.part.kick && s.bar == 0 && s.pos == 0).then_some(1.0)
 }
 
 /// The bass note starting at `s`: scale degrees above the chord's root.

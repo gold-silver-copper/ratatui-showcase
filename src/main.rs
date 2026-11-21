@@ -196,9 +196,11 @@ fn main() -> ExitCode {
     if config.music {
         app.add_audio_source::<Music>().add_systems(
             Update,
-            (move |mut commands: Commands, mut music: ResMut<Assets<Music>>, time: Res<Time>| {
+            (move |mut commands: Commands,
+                   mut music: ResMut<Assets<Music>>,
+                   clock: Res<Time<Real>>| {
                 // The show's clock now, so the music's bars land on its bar lines.
-                let start = time.elapsed_secs_f64();
+                let start = clock.elapsed_secs_f64();
                 commands.spawn(AudioPlayer(music.add(Music::new(seed, tempo, start))));
             })
             .run_if(run_once),
@@ -446,13 +448,15 @@ fn frame(
     (mut screen, mut last): (ResMut<screen::Screen>, Local<Frames>),
     mut show: ResMut<Show>,
     mut effects: ResMut<Effects>,
-    (glyphs, fonts, time): (Res<Glyph>, Res<SystemFonts>, Res<Time>),
+    (glyphs, fonts, time, clock): (Res<Glyph>, Res<SystemFonts>, Res<Time>, Res<Time<Real>>),
     mut gpu: gpu::Gpu,
     (gpu_frame, dither): (Res<gpu::GpuFrame>, Res<Dither>),
 ) -> Result {
     let show = &mut *show;
     let effects = effects.0.get_mut().unwrap_or_else(PoisonError::into_inner);
-    let now = time.elapsed_secs_f64();
+    // The beat runs on the wall clock, like the music: virtual time drops
+    // what a long frame takes over its cap.
+    let now = clock.elapsed_secs_f64();
     // While the terminal falls behind, some frames aren't drawn at all.
     let Some(dt) = screen.due(time.delta()) else {
         gpu.idle();
