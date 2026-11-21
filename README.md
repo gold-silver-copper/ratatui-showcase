@@ -3,8 +3,7 @@
 A fullscreen [ratatui](https://ratatui.rs) demo screen for big monitors and
 projectors. The ratatui logo and the "ratatui" wordmark take turns, scaled to
 fill any terminal while keeping their proportions, with
-[tachyonfx](https://github.com/ratatui/tachyonfx) transitions in the style of
-[Omarchy](https://omarchy.org)'s screensaver.
+[tachyonfx](https://github.com/ratatui/tachyonfx) transitions.
 
 ```sh
 cargo run --release
