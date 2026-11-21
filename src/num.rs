@@ -26,6 +26,30 @@ pub fn floor_u32(v: f32) -> u32 {
     }
 }
 
+/// `v` rounded down, clamped to `0..=u64::MAX`; NaN gives 0.
+pub fn floor_u64(v: f64) -> u64 {
+    if v.is_nan() || v < 1.0 {
+        return 0;
+    }
+    if v >= 18_446_744_073_709_549_568.0 {
+        return u64::MAX;
+    }
+    // As in `floor_u32`, with an f64's 52-bit mantissa and bias of 1023.
+    let bits = v.to_bits();
+    let exponent = u32::try_from((bits >> 52) & 0x7ff).unwrap_or(0);
+    let mantissa = (bits & 0xf_ffff_ffff_ffff) | 0x10_0000_0000_0000;
+    let shift = exponent.saturating_sub(1023);
+    if shift >= 52 {
+        mantissa
+            .checked_shl(shift.saturating_sub(52))
+            .unwrap_or(u64::MAX)
+    } else {
+        mantissa
+            .checked_shr(52_u32.saturating_sub(shift))
+            .unwrap_or(0)
+    }
+}
+
 /// `v` rounded down to an index, clamped at 0.
 pub fn floor_usize(v: f32) -> usize {
     usize::try_from(floor_u32(v)).unwrap_or(usize::MAX)
@@ -99,6 +123,23 @@ mod tests {
         ] {
             assert_eq!(floor_u32(v), floor, "{v}");
         }
+    }
+
+    #[test]
+    fn wide_floors_match_truncation() {
+        for (v, floor) in [
+            (0.0, 0),
+            (0.999, 0),
+            (1.0, 1),
+            (2.5, 2),
+            (65_536.75, 65_536),
+            (4.5e12, 4_500_000_000_000),
+        ] {
+            assert_eq!(floor_u64(v), floor, "{v}");
+        }
+        assert_eq!(floor_u64(-1.0), 0);
+        assert_eq!(floor_u64(f64::NAN), 0);
+        assert_eq!(floor_u64(f64::INFINITY), u64::MAX);
     }
 
     #[test]

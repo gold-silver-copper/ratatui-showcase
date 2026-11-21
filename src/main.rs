@@ -10,6 +10,7 @@ mod fx;
 mod glyph_table;
 mod glyphs;
 mod gpu;
+mod music;
 mod noise;
 mod num;
 mod params;
@@ -29,6 +30,7 @@ use std::time::Duration;
 
 use bevy::app::TaskPoolOptions;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
+use bevy::audio::{AddAudioSource, AudioPlugin};
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on};
@@ -44,6 +46,7 @@ use crate::card::Card;
 use crate::director::{Director, Pin};
 use crate::fonts::SystemFonts;
 use crate::glyphs::{GlyphSet, Glyphs};
+use crate::music::Music;
 use crate::stage::{Act, IDLES, Idle, Look, Mode, Post, Stage};
 use crate::tempo::Tempo;
 use crate::theme::{Palette, SHADERS, Shader};
@@ -52,7 +55,7 @@ use crate::transition::{Crossing, KINDS};
 const USAGE: &str = "\
 usage: ratatui-showcase [--hold SECONDS] [--bpm N] [--seed N] [--fps N]
                         [--glyphs blocks|sextants|full] [--pin LAYER=CHOICE]...
-                        [--watch] [--profile] [--dither]
+                        [--watch] [--profile] [--dither] [--music]
 
   --hold       how long each scene stays on screen, 0.5 to 86400, rounded to
                whole bars (default 7: 4 bars at 120 bpm)
@@ -68,7 +71,8 @@ usage: ratatui-showcase [--hold SECONDS] [--bpm N] [--seed N] [--fps N]
   --watch      reload src/shaders when they change, to tune effects live
   --profile    show how long each phase takes on the GPU in the caption
   --dither     smooth colours by dithering over time (every cell changes every
-               frame, so the terminal works about three times as hard)";
+               frame, so the terminal works about three times as hard)
+  --music      play music made up for the seed, in time with the show";
 
 struct Config {
     hold: f32,
@@ -79,6 +83,7 @@ struct Config {
     watch: bool,
     profile: bool,
     dither: bool,
+    music: bool,
     pins: Vec<Pin>,
 }
 
@@ -92,6 +97,7 @@ fn config() -> std::result::Result<Config, String> {
         watch: false,
         profile: false,
         dither: false,
+        music: false,
         pins: Vec::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -121,6 +127,7 @@ fn config() -> std::result::Result<Config, String> {
             "--profile" => config.profile = true,
             "--watch" => config.watch = true,
             "--dither" => config.dither = true,
+            "--music" => config.music = true,
             "-h" | "--help" => return Err(String::new()),
             _ => return Err(format!("unknown option {arg}")),
         }
@@ -147,44 +154,57 @@ fn main() -> ExitCode {
             return code;
         }
     };
-    let exit = App::new()
-        .add_plugins((
-            DefaultPlugins
-                .set(WindowPlugin {
-                    primary_window: None,
-                    exit_condition: ExitCondition::DontExit,
-                    close_when_requested: false,
-                    ..default()
-                })
-                // A handful of small systems: more threads only add overhead.
-                .set(TaskPoolPlugin {
-                    task_pool_options: TaskPoolOptions::with_num_threads(2),
-                })
-                .set(RenderPlugin {
-                    synchronous_pipeline_compilation: true,
-                    ..default()
-                }),
-            ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / config.fps)),
-            RatatuiPlugins::default(),
-            gpu::GpuPlugin {
-                watch: config.watch,
-                profile: config.profile,
-            },
-        ))
-        .insert_resource(SystemFonts::load())
-        .insert_resource(Glyph(Glyphs::new(config.glyphs)))
-        .insert_resource(Dither(config.dither))
-        .insert_resource(screen::Screen::new(config.fps))
-        .insert_resource(Show::new(
-            f64::from(config.hold),
-            Tempo::new(f64::from(config.bpm)),
-            config.seed.unwrap_or_else(|| fastrand::u64(..1_000_000)),
-            config.pins,
-        ))
-        .init_resource::<Effects>()
-        .add_systems(PreUpdate, input)
-        .add_systems(Update, frame)
-        .run();
+    let mut defaults = DefaultPlugins
+        .set(WindowPlugin {
+            primary_window: None,
+            exit_condition: ExitCondition::DontExit,
+            close_when_requested: false,
+            ..default()
+        })
+        // A handful of small systems: more threads only add overhead.
+        .set(TaskPoolPlugin {
+            task_pool_options: TaskPoolOptions::with_num_threads(2),
+        })
+        .set(RenderPlugin {
+            synchronous_pipeline_compilation: true,
+            ..default()
+        });
+    // Without music the sound device is left alone.
+    if !config.music {
+        defaults = defaults.disable::<AudioPlugin>();
+    }
+    let seed = config.seed.unwrap_or_else(|| fastrand::u64(..1_000_000));
+    let tempo = Tempo::new(f64::from(config.bpm));
+    let mut app = App::new();
+    app.add_plugins((
+        defaults,
+        ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / config.fps)),
+        RatatuiPlugins::default(),
+        gpu::GpuPlugin {
+            watch: config.watch,
+            profile: config.profile,
+        },
+    ))
+    .insert_resource(SystemFonts::load())
+    .insert_resource(Glyph(Glyphs::new(config.glyphs)))
+    .insert_resource(Dither(config.dither))
+    .insert_resource(screen::Screen::new(config.fps))
+    .insert_resource(Show::new(f64::from(config.hold), tempo, seed, config.pins))
+    .init_resource::<Effects>()
+    .add_systems(PreUpdate, input)
+    .add_systems(Update, frame);
+    if config.music {
+        app.add_audio_source::<Music>().add_systems(
+            Update,
+            (move |mut commands: Commands, mut music: ResMut<Assets<Music>>, time: Res<Time>| {
+                // The show's clock now, so the music's bars land on its bar lines.
+                let start = time.elapsed_secs_f64();
+                commands.spawn(AudioPlayer(music.add(Music::new(seed, tempo, start))));
+            })
+            .run_if(run_once),
+        );
+    }
+    let exit = app.run();
     if exit.is_success() {
         ExitCode::SUCCESS
     } else {
