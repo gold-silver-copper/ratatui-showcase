@@ -55,7 +55,7 @@ use crate::transition::{Crossing, KINDS};
 const USAGE: &str = "\
 usage: ratatui-showcase [--hold SECONDS] [--bpm N] [--seed N] [--fps N]
                         [--glyphs blocks|sextants|full] [--pin LAYER=CHOICE]...
-                        [--watch] [--profile] [--dither] [--music]
+                        [--watch] [--profile] [--dither] [--no-cards] [--music]
 
   --hold       how long each scene stays on screen, 0.5 to 86400, rounded to
                whole bars (default 7: 4 bars at 120 bpm)
@@ -72,6 +72,8 @@ usage: ratatui-showcase [--hold SECONDS] [--bpm N] [--seed N] [--fps N]
   --profile    show how long each phase takes on the GPU in the caption
   --dither     smooth colours by dithering over time (every cell changes every
                frame, so the terminal works about three times as hard)
+  --no-cards   play scene after scene, without the ratatui and widget cards
+               between them
   --music      play music made up for the seed, in time with the show";
 
 struct Config {
@@ -83,6 +85,7 @@ struct Config {
     watch: bool,
     profile: bool,
     dither: bool,
+    cards: bool,
     music: bool,
     pins: Vec<Pin>,
 }
@@ -97,6 +100,7 @@ fn config() -> std::result::Result<Config, String> {
         watch: false,
         profile: false,
         dither: false,
+        cards: true,
         music: false,
         pins: Vec::new(),
     };
@@ -127,6 +131,7 @@ fn config() -> std::result::Result<Config, String> {
             "--profile" => config.profile = true,
             "--watch" => config.watch = true,
             "--dither" => config.dither = true,
+            "--no-cards" => config.cards = false,
             "--music" => config.music = true,
             "-h" | "--help" => return Err(String::new()),
             _ => return Err(format!("unknown option {arg}")),
@@ -189,7 +194,13 @@ fn main() -> ExitCode {
     .insert_resource(Glyph(Glyphs::new(config.glyphs)))
     .insert_resource(Dither(config.dither))
     .insert_resource(screen::Screen::new(config.fps))
-    .insert_resource(Show::new(f64::from(config.hold), tempo, seed, config.pins))
+    .insert_resource(Show::new(
+        f64::from(config.hold),
+        tempo,
+        seed,
+        config.pins,
+        config.cards,
+    ))
     .init_resource::<Effects>()
     .add_systems(PreUpdate, input)
     .add_systems(Update, frame);
@@ -263,6 +274,8 @@ struct Show {
     /// The card on screen, and whether one comes once the scene has left.
     card: Option<Card>,
     card_due: bool,
+    /// Whether cards come between scenes at all.
+    with_cards: bool,
     /// Cards shown so far, and scenes since the last.
     cards: usize,
     scenes: usize,
@@ -275,7 +288,7 @@ struct Show {
 }
 
 impl Show {
-    fn new(hold: f64, tempo: Tempo, seed: u64, pins: Vec<Pin>) -> Self {
+    fn new(hold: f64, tempo: Tempo, seed: u64, pins: Vec<Pin>, with_cards: bool) -> Self {
         let director = Director::new(seed, pins);
         Self {
             act: director.pinned(Act {
@@ -297,6 +310,7 @@ impl Show {
             skip: false,
             card: None,
             card_due: false,
+            with_cards,
             cards: 0,
             scenes: 0,
             next: None,
@@ -546,7 +560,7 @@ fn frame(
                         show.phase = Phase::Leaving;
                     } else {
                         show.scenes = show.scenes.saturating_add(1);
-                        if show.scenes >= SCENES_PER_CARD {
+                        if show.with_cards && show.scenes >= SCENES_PER_CARD {
                             show.scenes = 0;
                             if let Some(stage) = &show.stage {
                                 effects
