@@ -157,7 +157,9 @@ fn mandelbrot(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
 
 fn burning_ship(s: u32, x: f32, y: f32, t: f32) -> vec3<f32> {
     let scale = 0.16 * exp(-(age(s) % 30.0) * 0.12);
-    let c = plane(x, 1.0 - y, vec2(-1.762, -0.028), scale);
+    // The iteration mirrors the usual imaginary axis, so the ship rises above
+    // the real axis: centre on it, not on the empty water below.
+    let c = plane(x, 1.0 - y, vec2(-1.762, 0.028), scale);
     var z = vec2(0.0);
     let limit = 120.0;
     var i = 0.0;
